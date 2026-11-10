@@ -146,3 +146,23 @@ pub(super) fn changed(
         touched.push(arena.key(child));
     }
 }
+
+/// A control's computed starting style changed outside an authored commit.
+pub(crate) fn control_env_changed(arena: &mut NodeArena, layout: &mut dyn LayoutMirror, slot: u32) {
+    arena.flags_mut(slot).insert(NodeFlags::STYLE_DIRTY);
+    arena.mark_export_dirty(slot, NodeFlags::PAINT_DIRTY);
+    invalidate_text(arena, layout, slot);
+    if let Some(node) = arena.taffy(slot) {
+        layout.restyle(arena, slot, node);
+        layout.mark_dirty(node);
+    }
+    let mut receipt = CommitReceipt::default();
+    propagate_inherited(
+        arena,
+        layout,
+        slot,
+        crate::arena::control_text::stopped_rows(),
+        &mut Vec::new(),
+        &mut receipt,
+    );
+}

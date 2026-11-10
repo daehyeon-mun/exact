@@ -141,18 +141,21 @@ impl<D: DataSource> Runner<D> {
 
     /// Note `rect` as delivered to `view`, before the host dispatches
     /// `Event::Resize(rect)` to it: the next [`Runner::resize_due`] leaves
-    /// it out until its box changes again.
-    pub fn resize_delivered(&mut self, view: ViewId, rect: ResizeRect) {
+    /// it out until its box changes again. False means an earlier callback
+    /// removed the target; the host must skip its queued notification.
+    #[must_use]
+    pub fn resize_delivered(&mut self, view: ViewId, rect: ResizeRect) -> bool {
         let arena = self.kernel.arena();
         self.resized
             .retain(|(key, _)| arena.resolve(*key).is_some());
         let Some(key) = arena.key_of(view) else {
-            return;
+            return false;
         };
         match self.resized.iter_mut().find(|(k, _)| *k == key) {
             Some(entry) => entry.1 = rect,
             None => self.resized.push((key, rect)),
         }
+        true
     }
 
     /// A box that straddles columns, as the browser sizes it (LLP 1093 D11):

@@ -374,3 +374,22 @@ fn rem_in_a_calculation_or_a_grid_track_follows_the_root_size() {
         "at 20 px"
     );
 }
+
+#[test]
+fn changing_an_em_ancestor_resolves_all_descendants_in_order() {
+    let mut k = tree();
+    k.apply(
+        0,
+        2,
+        &[Op::SetStyle {
+            id: 1,
+            patch: style(&[(StyleId::FontSize, "2em")]),
+        }],
+    )
+    .unwrap();
+    assert_eq!((font(&k, 1), font(&k, 2), font(&k, 3)), (32., 64., 64.));
+    assert_eq!(
+        k.node(3).unwrap().computed(StyleId::Width),
+        RowValue::Dimension(Dimension::Points(64.))
+    );
+}

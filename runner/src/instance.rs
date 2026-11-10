@@ -22,6 +22,7 @@ mod keys;
 pub mod looks;
 mod rare;
 mod region;
+mod retained_rows;
 pub mod tabs;
 mod text;
 pub mod theme;
@@ -159,6 +160,8 @@ pub struct RegionInst {
     /// A `for` subject as last keyed: the same object again, with the key's
     /// other inputs unchanged, is the same keys.
     subject: Option<Value>,
+    /// Detached keyed rows, bounded by `retained_rows::PER_REGION`.
+    kept: Option<Box<retained_rows::Kept>>,
 }
 
 #[derive(Debug)]
@@ -613,6 +616,9 @@ type SiteParent = (Option<NodesId>, Option<ArmsId>);
 #[derive(Debug)]
 pub struct SiteIndex {
     groups: Vec<(SiteParent, std::ops::Range<usize>)>,
+    /// First group for a parent or arm root; the full pair is checked on lookup.
+    node_groups: Vec<u32>,
+    arm_groups: Vec<u32>,
     sites: Vec<(u32, Site)>,
     /// What every binding and site reads.
     deps: Deps,
@@ -666,8 +672,22 @@ impl SiteIndex {
             sites.push((order, site));
         }
         groups.shrink_to_fit();
+        let mut node_groups = vec![u32::MAX; plan.nodes.len()];
+        let mut arm_groups = vec![u32::MAX; plan.arms.len()];
+        for (i, ((parent, arm), _)) in groups.iter().enumerate() {
+            let first = match (parent, arm) {
+                (Some(n), _) => &mut node_groups[n.0 as usize],
+                (None, Some(a)) => &mut arm_groups[a.0 as usize],
+                (None, None) => continue,
+            };
+            if *first == u32::MAX {
+                *first = i as u32;
+            }
+        }
         let mut index = Self {
             groups,
+            node_groups,
+            arm_groups,
             sites,
             deps: Deps::default(),
             keyframes: bridge::keyframes(plan),
@@ -694,6 +714,17 @@ impl SiteIndex {
     }
 
     fn children(&self, parent: Option<NodesId>, arm: Option<ArmsId>) -> &[(u32, Site)] {
+        let first = match (parent, arm) {
+            (Some(n), _) => self.node_groups.get(n.0 as usize).copied(),
+            (None, Some(a)) => self.arm_groups.get(a.0 as usize).copied(),
+            (None, None) => Some(0),
+        };
+        let Some((key, range)) = first.and_then(|i| self.groups.get(i as usize)) else {
+            return &[];
+        };
+        if *key == (parent, arm) {
+            return &self.sites[range.clone()];
+        }
         self.groups
             .binary_search_by_key(&(parent, arm), |(key, _)| *key)
             .map_or(&[], |i| &self.sites[self.groups[i].1.clone()])
@@ -1287,7 +1318,8 @@ pub(crate) fn invalid_face(view: ViewId, text: String, then: &str) -> String {
 /// The root of the instance tree: the plan's top-level sites.
 #[derive(Debug)]
 pub struct Tree {
-    has_collections: bool,
+    /// Where the plan can put a virtualized list, if anywhere.
+    lists: collection::ListSites,
     children: Vec<Child>,
     last_roots: Vec<ViewId>,
     /// The inputs the kernel shows, as of the last create or update.
@@ -1301,16 +1333,7 @@ impl Tree {
     pub fn create(u: &mut Update<'_>) -> Result<Tree, InstanceError> {
         let children = realize(u, None, None, &[])?;
         let mut tree = Tree {
-            has_collections: u.env.plan.bindings.iter().any(|b| {
-                b.kind == BindingKind::Prop
-                    && b.id == exact_kernel::PropId::Virtualized as u16
-                    && u.env.plan.code(b.expr)
-                        != [
-                            exact_plan::Opcode::Bool as u8,
-                            0,
-                            exact_plan::Opcode::Return as u8,
-                        ]
-            }),
+            lists: collection::ListSites::of(u.env.plan),
             children,
             last_roots: Vec::new(),
             seen: Seen::of(&u.env),
@@ -1333,7 +1356,7 @@ impl Tree {
             self.emit_roots(u);
         }
         self.open_tabs(u)?;
-        if self.has_collections && (u.text_styled || u.ops.iter().any(|op| matches!(op, Op::SetStyle { id, patch } if *id <= last_existing_view && patch.mask.intersects(exact_kernel::StyleMask::TEXT)))) {
+        if self.lists.any && (u.text_styled || u.ops.iter().any(|op| matches!(op, Op::SetStyle { id, patch } if *id <= last_existing_view && patch.mask.intersects(exact_kernel::StyleMask::TEXT)))) {
             if let Some(lists) = u.env.lists {
                 (lists.typography)(&mut self.children, u, &[])?;
             }

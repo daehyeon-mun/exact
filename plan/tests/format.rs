@@ -78,6 +78,48 @@ fn a_plan_round_trips_and_its_bytes_are_canonical() {
 }
 
 #[test]
+fn argument_lists_share_only_identical_ordered_code_ranges() {
+    let mut b = PlanBuilder::new(0xdead_beef, 0x1234);
+    let one = b.constant(&Value::Number(1.0));
+    let two = b.constant(&Value::Number(2.0));
+    let first = b.args(&[one, two, one]);
+    let same = b.args(&[one, two, one]);
+    let reordered = b.args(&[one, one, two]);
+    let prefix = b.args(&[one]);
+    let empty = b.args(&[]);
+    assert_eq!(first, same);
+    assert_ne!(first, reordered);
+    assert_ne!(first, prefix);
+    assert_eq!(empty.len, 0);
+    assert_eq!(b.args(&[]), empty);
+    let plan = b.finish().unwrap();
+    assert_eq!(plan.args.len(), 7);
+    let decoded = Plan::decode(&plan.encode()).unwrap();
+    for (range, expected) in [
+        (first, vec![one, two, one]),
+        (reordered, vec![one, one, two]),
+        (prefix, vec![one]),
+        (empty, vec![]),
+    ] {
+        assert_eq!(
+            range
+                .iter()
+                .map(|i| decoded.arg(i).expr)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    // Extending a decoded plan preserves all old offsets; new lists still share.
+    let mut continued = PlanBuilder::from_plan(decoded.clone());
+    let extra = continued.args(&[two, one]);
+    assert_eq!(continued.args(&[two, one]), extra);
+    let extended = continued.finish().unwrap();
+    assert_eq!(&extended.args[..7], &decoded.args[..]);
+    assert_eq!(extended.args.len(), 9);
+    assert_eq!(Plan::decode(&extended.encode()).unwrap(), extended);
+}
+
+#[test]
 fn resource_context_defaults_to_zero_and_decoding_refuses_an_oversized_tail() {
     let plan = sample();
     assert_eq!(plan.resources[0].context, 0);
@@ -491,6 +533,49 @@ fn loading_is_a_validation_pass() {
             ..
         })
     ));
+}
+
+#[test]
+fn shared_code_validation_keeps_range_identity_and_rechecks_changed_bytes() {
+    let mut b = PlanBuilder::new(0, 0);
+    let value = b.constant(&Value::Number(1.0));
+    let binding = BindingsRow {
+        kind: BindingKind::Style,
+        id: 0,
+        expr: value,
+        written: true,
+    };
+    b.node(0, None, None, 0, &[binding, binding], &[], None);
+    let plan = b.finish().unwrap();
+    assert_eq!(
+        plan.bindings.get(0).unwrap().expr,
+        plan.bindings.get(1).unwrap().expr
+    );
+    assert_eq!(Plan::decode(&plan.encode()).unwrap(), plan);
+
+    let mut shortened = plan.clone();
+    shortened.bindings.to_mut()[1].expr.len -= 1;
+    assert_eq!(
+        shortened.validate(),
+        Err(PlanError::BadCode {
+            table: "bindings",
+            row: 1,
+            field: "expr",
+            error: CodeError::NoReturn,
+        })
+    );
+
+    let mut changed = plan;
+    changed.validate().unwrap();
+    changed.code.to_mut()[value.offset as usize] = 250;
+    let error = PlanError::BadCode {
+        table: "bindings",
+        row: 0,
+        field: "expr",
+        error: CodeError::UnknownOpcode { pc: 0, byte: 250 },
+    };
+    assert_eq!(changed.validate(), Err(error.clone()));
+    assert_eq!(Plan::decode(&changed.encode()), Err(error));
 }
 
 #[test]

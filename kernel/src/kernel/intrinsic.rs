@@ -183,6 +183,7 @@ impl Kernel {
         }
         let owner = self.arena.measure_owner(slot);
         self.arena.revise_text(owner, true);
+        self.control_changed_at(owner);
         self.arena
             .flags_mut(owner)
             .insert(crate::NodeFlags::TEXT_DIRTY);
@@ -260,6 +261,8 @@ impl Kernel {
                 continue;
             }
             self.arena.set_intrinsic(slot, Some(size));
+            // A native button's symbol is its face's (`ButtonInputs`).
+            self.control_changed_at(slot);
             if let Some(r) = &mut self.region {
                 r.intrinsic(slot);
             }

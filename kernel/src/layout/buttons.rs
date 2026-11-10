@@ -66,44 +66,29 @@ impl ButtonRecord {
 }
 
 impl LayoutTree {
+    /// Ask the host for the measure of each native button among `ready`,
+    /// the stale controls this layout reaches (`controls.rs`), whose inputs
+    /// did change; a node no longer one sheds its record.
     pub(super) fn prepare_buttons(
         &mut self,
-        root: NodeId,
+        ready: &[(NodeId, u32)],
         arena: &NodeArena,
         measurer: &mut dyn TextMeasurer,
-    ) -> Result<IdMap<u32, NodeId>, LayoutError> {
-        let mut requests = IdMap::default();
-        if !arena.has_type(NodeType::Control) {
-            return Ok(requests);
-        }
-        let mut nodes = Vec::new();
-        for (&node, &slot) in &self.slots {
+    ) -> Result<(), LayoutError> {
+        let revision = measurer.measure_revision();
+        for &(node, slot) in ready {
             if !arena.is_native_button(slot) {
+                if self.button_records.remove(&node).is_some() {
+                    self.button_nodes.remove(&slot);
+                }
                 continue;
             }
-            let mut at = Some(node);
-            while let Some(n) = at {
-                if self
-                    .taffy
-                    .style(n)
-                    .is_ok_and(|s| s.display == taffy::Display::None)
-                {
-                    break;
-                }
-                if n == root {
-                    nodes.push((node, slot));
-                    break;
-                }
-                at = self.taffy.parent(n);
-            }
-        }
-        let revision = measurer.measure_revision();
-        for (node, slot) in nodes {
             let changed = self
                 .button_records
                 .get(&node)
                 .is_none_or(|r| r.revision != revision || !r.inputs.matches(arena, slot));
             if changed {
+                self.button_nodes.insert(slot, node);
                 self.button_records.insert(
                     node,
                     ButtonRecord {
@@ -140,13 +125,16 @@ impl LayoutTree {
                     record.supported = true;
                 }
                 self.provisional_chrome |= record.provisional;
+                let again = record.provisional || !record.supported;
                 // Only changed inputs and pending main-thread misses invalidate
                 // Taffy. An unrelated layout retains the final offers below.
                 self.mark_dirty(node);
+                if again {
+                    self.ask_control_again(node);
+                }
             }
-            requests.insert(slot, node);
         }
-        Ok(requests)
+        Ok(())
     }
 }
 

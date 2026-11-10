@@ -13,7 +13,7 @@ mod reorder_api;
 mod reorder_group;
 #[cfg(test)]
 mod reorder_tests;
-mod reuse;
+pub(super) mod reuse;
 pub(crate) mod shown;
 use shown::in_collection_row;
 mod start;
@@ -31,7 +31,7 @@ use index::{MeasurementToken, SizeIndex};
 pub use into_view::{Align, IntoView, IntoViewStatus};
 pub(crate) use keep::idents as keep_mounted;
 pub use reorder_api::*;
-pub(super) use traversal::{collections_json, invalidate_typography};
+pub(super) use traversal::{collections_json, invalidate_typography, ListSites};
 
 /// A collection's data update, through [`super::LISTS`] (LLP 1047.000 §9).
 pub(super) fn update_collection(

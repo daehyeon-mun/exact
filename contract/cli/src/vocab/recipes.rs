@@ -38,6 +38,7 @@ pub const RECIPES: &[(&str, &str)] = &[
     recipe!("edit-sheet"),
     recipe!("editable-rows"),
     recipe!("error-alert"),
+    recipe!("fast-interactions"),
     recipe!("fetch-loading-error"),
     recipe!("files-and-grants"),
     recipe!("first-launch"),

@@ -64,7 +64,7 @@ const REFUSED_STYLES: &[StyleId] = &[
 ];
 
 /// Whether a rebind could carry state of this site's into another item's row.
-fn site_refused(plan: &Plan, node: NodesId) -> bool {
+pub(in crate::instance) fn site_refused(plan: &Plan, node: NodesId) -> bool {
     let row = plan.node(node);
     if row.surface.is_some()
         || NodeType::from_wire(row.node_type).is_none_or(|t| REFUSED_TYPES.contains(&t))

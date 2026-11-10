@@ -116,6 +116,30 @@ fn site_index_keeps_parent_arm_and_stable_mixed_order() {
     );
     assert!(sites.children(Some(left), Some(arms[1])).is_empty());
     assert!(sites.children(Some(right), Some(arms[1])).is_empty());
+    for parent in
+        std::iter::once(None).chain((0..=plan.nodes.len()).map(|n| Some(NodesId(n as u32))))
+    {
+        for arm in
+            std::iter::once(None).chain((0..=plan.arms.len()).map(|a| Some(ArmsId(a as u32))))
+        {
+            let mut expected: Vec<_> = plan
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.parent == parent && n.arm == arm)
+                .map(|(i, n)| (n.order, Site::Node(NodesId(i as u32))))
+                .chain(
+                    plan.regions
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| r.parent == parent && r.arm == arm)
+                        .map(|(i, r)| (r.order, Site::Region(RegionsId(i as u32)))),
+                )
+                .collect();
+            expected.sort_by_key(|(order, site)| (*order, site.rank()));
+            assert_eq!(sites.children(parent, arm), expected, "{parent:?}/{arm:?}");
+        }
+    }
 }
 
 /// A realized child fits Apple's allocator's 112-byte size class, as does a

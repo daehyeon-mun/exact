@@ -56,7 +56,9 @@ impl<D: DataSource> Host<D> {
             depth = shallowest + 1;
             let mut receipts = Vec::new();
             for (view, rect, _) in due {
-                self.runner.resize_delivered(view, rect);
+                if !self.runner.resize_delivered(view, rect) {
+                    continue;
+                }
                 match self.runner.dispatch(view, Event::Resize(rect)) {
                     Ok(receipt) => receipts.push(Timed {
                         at_ms: self.now_ms,
@@ -143,6 +145,60 @@ mod intersect_tests {
         ) -> Result<exact_plan::Value, exact_runner::DataError> {
             Err(exact_runner::DataError::UnknownSource(name.into()))
         }
+    }
+
+    #[test]
+    fn resize_round_skips_a_later_observer_removed_by_an_earlier_callback() {
+        use exact_plan::Value;
+        let plan = contract::compile(
+            r#"component App
+  state shown = true
+  state removedCalls = 0
+  state survivingWidth = 0
+  action parent(w: number, h: number, r: DOMRectReadOnly)
+    shown = w <= 100
+  action removed(w: number, h: number, r: DOMRectReadOnly)
+    removedCalls = removedCalls + 1
+  action surviving(w: number, h: number, r: DOMRectReadOnly)
+    survivingWidth = w
+  view
+    column width="100%" resize=parent
+      if shown
+        view width="100%" height=20 resize=removed testId="removed"
+      view width="100%" height=20 resize=surviving
+"#,
+        )
+        .unwrap()
+        .encode();
+        let (mut host, first) = Host::boot(
+            &plan,
+            Empty,
+            Box::new(exact_kernel::MonospaceMeasurer::default()),
+            100.,
+            100.,
+        )
+        .unwrap();
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert!(first["error"].is_null(), "{first}");
+        assert_eq!(host.runner.slot("removedCalls"), Some(&Value::Number(1.)));
+
+        let removed = host.runner.kernel().find_by_test_id("removed")[0];
+        let batch: serde_json::Value = serde_json::from_str(&host.resize(200., 100.)).unwrap();
+        assert!(batch["error"].is_null(), "{batch}");
+        assert!(host.runner.kernel().node_by_key(removed).is_none());
+        assert_eq!(host.runner.slot("removedCalls"), Some(&Value::Number(1.)));
+        assert_eq!(
+            host.runner.slot("survivingWidth"),
+            Some(&Value::Number(200.))
+        );
+
+        let batch: serde_json::Value = serde_json::from_str(&host.resize(100., 100.)).unwrap();
+        assert!(batch["error"].is_null(), "{batch}");
+        assert_eq!(host.runner.slot("removedCalls"), Some(&Value::Number(2.)));
+        assert_eq!(
+            host.runner.slot("survivingWidth"),
+            Some(&Value::Number(100.))
+        );
     }
 
     #[test]

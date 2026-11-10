@@ -23,6 +23,7 @@ use crate::txn::{self, CommitReceipt, Target};
 use crate::wire::{self, Op};
 mod alert;
 mod block;
+mod controls;
 mod cover;
 mod document;
 mod environment;
@@ -871,6 +872,7 @@ impl Kernel {
         {
             layout.mark_dirty(node);
         }
+        self.control_changed_at(key.index);
         true
     }
 

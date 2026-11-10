@@ -16,67 +16,75 @@ use crate::held::Held;
 use crate::vm::{self, Env, RowSlots};
 use exact_plan::{Code, Opcode, Plan, Stdlib, Value};
 
-/// A set of input bits, held up to its last word with a bit set: most of a
-/// plan's bodies read nothing that changes (a literal style row), and those
-/// hold no words at all.
-#[derive(Debug, Clone, Default, Eq)]
-pub struct Bits(Box<[u64]>);
+/// Nonzero input words in ascending order. Expanded plans have high slot
+/// indices but each binding reads few of them; zero prefixes waste work in
+/// construction, interning and every later union.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Bits(Vec<(usize, u64)>);
 
 impl Bits {
-    fn grow(&mut self, words: usize) {
-        if words > self.0.len() {
-            let mut grown = std::mem::take(&mut self.0).into_vec();
-            grown.resize(words, 0);
-            self.0 = grown.into_boxed_slice();
+    pub(crate) fn set(&mut self, i: usize) {
+        let word = i / 64;
+        let bit = 1 << (i % 64);
+        match self.0.binary_search_by_key(&word, |(at, _)| *at) {
+            Ok(at) => self.0[at].1 |= bit,
+            Err(at) => self.0.insert(at, (word, bit)),
         }
     }
-    pub(crate) fn set(&mut self, i: usize) {
-        self.grow(i / 64 + 1);
-        self.0[i / 64] |= 1 << (i % 64);
-    }
     pub(crate) fn get(&self, i: usize) -> bool {
-        self.0.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0)
+        self.0
+            .binary_search_by_key(&(i / 64), |(at, _)| *at)
+            .is_ok_and(|at| self.0[at].1 & (1 << (i % 64)) != 0)
     }
     pub(crate) fn union(&mut self, other: &Bits) {
-        self.grow(
-            other
-                .0
-                .iter()
-                .rposition(|w| *w != 0)
-                .map_or(0, |last| last + 1),
-        );
-        for (a, b) in self.0.iter_mut().zip(other.0.iter()) {
-            *a |= b;
+        let mut at = 0;
+        for &(word, bits) in &other.0 {
+            while at < self.0.len() && self.0[at].0 < word {
+                at += 1;
+            }
+            if at < self.0.len() && self.0[at].0 == word {
+                self.0[at].1 |= bits;
+            } else {
+                self.0.insert(at, (word, bits));
+            }
+            at += 1;
         }
     }
     pub(crate) fn intersects(&self, other: &Bits) -> bool {
-        self.0.iter().zip(other.0.iter()).any(|(a, b)| a & b != 0)
+        let (mut a, mut b) = (0, 0);
+        while a < self.0.len() && b < other.0.len() {
+            let (aw, ab) = self.0[a];
+            let (bw, bb) = other.0[b];
+            match aw.cmp(&bw) {
+                std::cmp::Ordering::Less => a += 1,
+                std::cmp::Ordering::Greater => b += 1,
+                std::cmp::Ordering::Equal => {
+                    if ab & bb != 0 {
+                        return true;
+                    }
+                    a += 1;
+                    b += 1;
+                }
+            }
+        }
+        false
     }
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.iter().all(|w| *w == 0)
+        self.0.is_empty()
     }
-}
-
-/// Hashed as [`PartialEq`] compares: up to the last word with a bit set.
-impl std::hash::Hash for Bits {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        let words = self
-            .0
-            .iter()
-            .rposition(|w| *w != 0)
-            .map_or(0, |last| last + 1);
-        self.0[..words].hash(state);
-    }
-}
-
-/// Equal when they hold the same bits, whatever words each holds.
-impl PartialEq for Bits {
-    fn eq(&self, other: &Bits) -> bool {
-        let (short, long) = match self.0.len() <= other.0.len() {
-            true => (&self.0, &other.0),
-            false => (&other.0, &self.0),
-        };
-        short[..] == long[..short.len()] && long[short.len()..].iter().all(|w| *w == 0)
+    /// The set bits, ascending.
+    pub(crate) fn ones(&self) -> impl Iterator<Item = usize> + '_ {
+        self.0.iter().flat_map(|&(word, bits)| {
+            let mut rest = bits;
+            std::iter::from_fn(move || {
+                if rest == 0 {
+                    return None;
+                }
+                let bit = rest.trailing_zeros() as usize;
+                rest &= rest - 1;
+                Some(word * 64 + bit)
+            })
+        })
     }
 }
 
@@ -321,11 +329,11 @@ impl Deps {
         let scan = |code: Code| scan(plan, layout, code);
         let mut deps = Deps {
             layout: Some(layout),
-            bindings: plan.bindings.iter().map(|b| scan(b.expr)).collect(),
+            bindings: by_code(plan.bindings.iter().map(|b| b.expr), &scan),
             surface_args: plan.surface_args.iter().map(|a| scan(a.expr)).collect(),
             nodes: ReadsTable::default(),
-            subjects: plan.regions.iter().map(|r| scan(r.subject)).collect(),
-            keys: plan.regions.iter().map(|r| scan(r.key)).collect(),
+            subjects: by_code(plan.regions.iter().map(|r| r.subject), &scan),
+            keys: by_code(plan.regions.iter().map(|r| r.key), &scan),
             index_keys: plan
                 .regions
                 .iter()
@@ -357,18 +365,20 @@ impl Deps {
             .map(|(_, s)| (*s, false))
             .collect();
         while let Some((site, done)) = stack.pop() {
-            let kids = |site| match site {
-                super::Site::Node(n) => children.children(Some(n), plan.node(n).arm).to_vec(),
-                super::Site::Region(r) => plan
-                    .region(r)
-                    .arms
-                    .iter()
-                    .flat_map(|arm| children.children(None, Some(arm)).iter().copied())
-                    .collect(),
+            let kids = |site| {
+                let (direct, arms) = match site {
+                    super::Site::Node(n) => (children.children(Some(n), plan.node(n).arm), None),
+                    super::Site::Region(r) => (&[][..], Some(plan.region(r).arms)),
+                };
+                direct.iter().copied().chain(
+                    arms.into_iter()
+                        .flat_map(|arms| arms.iter())
+                        .flat_map(|arm| children.children(None, Some(arm)).iter().copied()),
+                )
             };
             if !done {
                 stack.push((site, true));
-                stack.extend(kids(site).into_iter().map(|(_, s)| (s, false)));
+                stack.extend(kids(site).map(|(_, s)| (s, false)));
                 continue;
             }
             let of = |site| match site {
@@ -420,20 +430,25 @@ impl Deps {
     /// The inputs `reads` names, in bit order.
     pub(crate) fn inputs<'a>(&self, reads: &'a Reads) -> impl Iterator<Item = Input> + 'a {
         let l = self.layout.expect("built from a plan");
-        (0..l.width()).filter(|i| reads.bits.get(*i)).map(move |i| {
-            let (d, r, m) = (l.derive(0), l.resource(0), l.pending_resource(0));
-            let (pm, clock) = (l.pending_mutation(0), l.clock());
-            let failed = l.failed_resource(0);
-            match i {
-                _ if i < d => Input::Slot(i),
-                _ if i < r => Input::Derive(i - d),
-                _ if i < m => Input::Resource(i - r),
-                _ if i < pm => Input::PendingResource(i - m),
-                _ if i < failed => Input::PendingMutation(i - pm),
-                _ if i < clock => Input::FailedResource(i - failed),
-                _ => Input::Clock,
-            }
-        })
+        let width = l.width();
+        reads
+            .bits
+            .ones()
+            .take_while(move |i| *i < width)
+            .map(move |i| {
+                let (d, r, m) = (l.derive(0), l.resource(0), l.pending_resource(0));
+                let (pm, clock) = (l.pending_mutation(0), l.clock());
+                let failed = l.failed_resource(0);
+                match i {
+                    _ if i < d => Input::Slot(i),
+                    _ if i < r => Input::Derive(i - d),
+                    _ if i < m => Input::Resource(i - r),
+                    _ if i < pm => Input::PendingResource(i - m),
+                    _ if i < failed => Input::PendingMutation(i - pm),
+                    _ if i < clock => Input::FailedResource(i - failed),
+                    _ => Input::Clock,
+                }
+            })
     }
 
     /// The inputs that differ between what the tree last showed and `env`.
@@ -496,6 +511,33 @@ impl Deps {
         }
         bits
     }
+}
+
+/// The table of `codes`' reads, as `collect` makes it, with each distinct
+/// code range scanned and placed once: an expanded plan's rows share their
+/// component's code, so most rows repeat one.
+fn by_code(codes: impl Iterator<Item = Code>, scan: &dyn Fn(Code) -> Reads) -> ReadsTable {
+    let mut at = Vec::with_capacity(codes.size_hint().0);
+    let mut placed: std::collections::HashMap<(u32, u32), u32> = Default::default();
+    let mut places: std::collections::HashMap<Reads, u32> = Default::default();
+    for code in codes {
+        let place = *placed.entry((code.offset, code.len)).or_insert_with(|| {
+            let reads = scan(code);
+            match reads == Reads::default() {
+                true => 0,
+                false => {
+                    let next = places.len() as u32 + 1;
+                    *places.entry(reads).or_insert(next)
+                }
+            }
+        });
+        at.push(place);
+    }
+    let mut reads = vec![Reads::default(); places.len() + 1];
+    for (set, place) in places {
+        reads[place as usize] = set;
+    }
+    ReadsTable { at, reads }
 }
 
 fn is_index_key(code: &[u8]) -> bool {
@@ -642,6 +684,139 @@ impl RowWrites {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_code_ranges_keep_full_range_and_plan_identity() {
+        use exact_plan::asm::Asm;
+        use std::cell::Cell;
+
+        let layout = Layout {
+            slots: 0,
+            derives: 0,
+            resources: 0,
+            mutations: 0,
+        };
+        for depth in [0, 1, 63] {
+            let mut code = Asm::new();
+            code.load_item(depth).load_index(depth);
+            let bytes = code.finish();
+            let whole = Code {
+                offset: 0,
+                len: bytes.len() as u32,
+            };
+            let truncated = Code { len: 1, ..whole };
+            let empty = Code { len: 0, ..whole };
+            let plan = Plan {
+                code: bytes.into(),
+                ..Plan::default()
+            };
+            let calls = Cell::new(0);
+            let codes = [whole, truncated, whole, empty, truncated, whole, empty];
+            let table = by_code(codes.into_iter(), &|code| {
+                calls.set(calls.get() + 1);
+                scan(&plan, layout, code)
+            });
+            assert_eq!(calls.get(), 3, "each full range is scanned once");
+            for i in [0, 2, 5] {
+                assert_eq!(table[i].frames, 1 << depth);
+                assert_eq!(table[i].positions, 1 << depth);
+                assert_eq!(table[i].fields, if depth == 0 { !0 } else { 0 });
+                assert!(!table[i].opaque);
+            }
+            for i in [1, 4] {
+                assert!(table[i].opaque, "a shorter range still refuses decoding");
+            }
+            for i in [3, 6] {
+                assert_eq!(table[i], Reads::default());
+            }
+        }
+    }
+
+    #[test]
+    fn input_sets_match_a_set_reference_for_sparse_and_dense_dependencies() {
+        use std::collections::BTreeSet;
+        use std::hash::{Hash, Hasher};
+        let hash = |bits: &Bits| {
+            let mut state = std::collections::hash_map::DefaultHasher::new();
+            bits.hash(&mut state);
+            state.finish()
+        };
+        let from = |set: &BTreeSet<usize>| {
+            let mut bits = Bits::default();
+            for &i in set {
+                bits.set(i);
+            }
+            bits
+        };
+        for seed in 0..128_u64 {
+            let mut random = seed + 1;
+            let mut next = || {
+                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (random >> 32) as usize
+            };
+            let (mut a, mut b) = (BTreeSet::new(), BTreeSet::new());
+            for _ in 0..256 {
+                let i = next() % if seed % 2 == 0 { 256 } else { 65_536 };
+                if next() % 2 == 0 {
+                    a.insert(i);
+                } else {
+                    b.insert(i);
+                }
+            }
+            // Word boundaries, isolated high slots, and the empty set.
+            if seed == 0 {
+                a.clear();
+                b.clear();
+            }
+            if seed == 1 {
+                a.extend([0, 63, 64, 127, 128, 65_535]);
+                b.clear();
+            }
+            if seed == 2 {
+                a.extend(0..4096);
+                b.extend(2048..8192);
+            }
+            let (mut left, right) = (from(&a), from(&b));
+            assert_eq!(left.is_empty(), a.is_empty());
+            assert_eq!(left.intersects(&right), !a.is_disjoint(&b));
+            assert_eq!(right.intersects(&left), !a.is_disjoint(&b));
+            let mut reversed = Bits::default();
+            for &i in a.iter().rev() {
+                reversed.set(i);
+                reversed.set(i);
+            }
+            assert_eq!(left, reversed);
+            assert_eq!(hash(&left), hash(&reversed));
+            for i in (0..512).chain([1023, 1024, 32_767, 65_535, 65_536]) {
+                assert_eq!(left.get(i), a.contains(&i));
+            }
+            let expected: BTreeSet<_> = a.union(&b).copied().collect();
+            left.union(&right);
+            assert_eq!(
+                left.ones().collect::<Vec<_>>(),
+                expected.iter().copied().collect::<Vec<_>>()
+            );
+            let mut reversed_union = right.clone();
+            reversed_union.union(&reversed);
+            assert_eq!(left, reversed_union);
+            assert_eq!(hash(&left), hash(&reversed_union));
+            left.union(&right);
+            assert_eq!(left, from(&expected));
+        }
+    }
+
+    #[test]
+    fn sparse_bits_preserve_ascending_word_boundaries() {
+        let mut bits = Bits::default();
+        for bit in [0, 63, 64, 127, 128, 4095] {
+            bits.set(bit);
+        }
+        assert_eq!(
+            bits.ones().collect::<Vec<_>>(),
+            vec![0, 63, 64, 127, 128, 4095]
+        );
+        assert_eq!(Bits::default().ones().next(), None);
+    }
 
     #[test]
     fn frame_masks_shift_with_a_sticky_far_bit() {

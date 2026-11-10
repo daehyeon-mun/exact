@@ -413,6 +413,7 @@ fn open_panel(
     Ok(vec![Child::Region(RegionInst {
         region,
         subject: None,
+        kept: None,
         active: Active::Arm {
             arm: Some(0),
             frame,

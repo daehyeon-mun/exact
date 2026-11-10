@@ -92,7 +92,7 @@ fn native_resize_reports_content_size_and_authored_padding_without_chrome() {
                 height: 30.0
             }
         );
-        r.resize_delivered(view, rect);
+        assert!(r.resize_delivered(view, rect));
         // Feeding the observed content size back must not grow the field.
         let mut feedback = StyleProps::default();
         feedback

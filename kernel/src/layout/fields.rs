@@ -24,37 +24,20 @@ impl LayoutTree {
         })
     }
 
+    /// Ask the host for the chrome of each field among `ready`, the stale
+    /// controls this layout reaches (`controls.rs`), and derive its engine
+    /// style from it; a field no longer native sheds its chrome.
     pub(super) fn prepare_fields(
         &mut self,
-        root: NodeId,
+        ready: &[(NodeId, u32)],
         arena: &NodeArena,
         measurer: &mut dyn TextMeasurer,
     ) -> Result<(), LayoutError> {
         self.provisional_chrome = false;
-        if !arena.has_type(NodeType::TextInput) && self.field_chrome.is_empty() {
-            return Ok(());
-        }
         let mut answers = Vec::new();
-        for (&node, &slot) in &self.slots {
+        for &(node, slot) in ready {
             let native = arena.is_native_text_control(slot);
             if !native && !self.field_chrome.contains_key(&node) {
-                continue;
-            }
-            let mut at = Some(node);
-            let mut visible = true;
-            let mut inside = false;
-            while let Some(n) = at {
-                visible &= self
-                    .taffy
-                    .style(n)
-                    .is_ok_and(|s| s.display != taffy::Display::None);
-                if n == root {
-                    inside = true;
-                    break;
-                }
-                at = self.taffy.parent(n);
-            }
-            if !inside || !visible {
                 continue;
             }
             let chrome = if native {
@@ -64,6 +47,12 @@ impl LayoutTree {
                 let family = platform
                     .filter(|f| f.family_id == text.font_family)
                     .map_or_else(String::new, |f| f.family.clone());
+                // A grouped list's field is asked for at every layout: a
+                // list that stops being one says nothing to its fields.
+                let cell = arena.is_cell_field(slot);
+                if cell {
+                    self.ask_control_again(node);
+                }
                 let request = FieldChromeRequest {
                     kind,
                     font: ControlFont {
@@ -73,7 +62,7 @@ impl LayoutTree {
                         weight: text.font_weight,
                         style: text.font_style,
                     },
-                    cell: arena.is_cell_field(slot),
+                    cell,
                     labelled: (arena.props(slot).str(crate::PropId::Placeholder))
                         .is_some_and(|p| !p.is_empty()),
                 };
@@ -121,11 +110,14 @@ impl LayoutTree {
                 if let Some(&minimum) = self.field_minima.get(&node) {
                     style.min_size.height = taffy::LengthPercentageAuto::length(minimum);
                 }
-                self.set_style(node, style);
+                self.set_prepared_style(node, style);
+                if chrome.provisional {
+                    self.ask_control_again(node);
+                }
             } else {
                 self.field_chrome.remove(&node);
                 self.field_minima.remove(&node);
-                self.set_style(node, style);
+                self.set_prepared_style(node, style);
             }
         }
         Ok(())
@@ -149,7 +141,7 @@ impl LayoutTree {
             let next = taffy::LengthPercentageAuto::length(minimum);
             if style.min_size.height != next {
                 style.min_size.height = next;
-                self.set_style(node, style);
+                self.set_prepared_style(node, style);
                 changed = true;
             }
         }

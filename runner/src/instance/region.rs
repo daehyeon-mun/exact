@@ -9,6 +9,7 @@ impl RegionInst {
         let mut inst = RegionInst {
             region,
             subject: None,
+            kept: None,
             active: match u.env.plan.region(region).kind {
                 RegionKind::Each => Active::Rows { rows: Vec::new() },
                 _ => Active::Arm {
@@ -89,6 +90,7 @@ impl RegionInst {
             }
             (RegionKind::Each, Active::Rows { rows }) => {
                 let body = &deps.bodies[index];
+                let each_arm = row.arms.iter().next();
                 let keys_stale = fresh || u.stale_outside(&deps.keys[index], 1);
                 let subject = if subject_stale || keys_stale {
                     Some(u.eval(row.subject, frames)?)
@@ -104,6 +106,7 @@ impl RegionInst {
                 if !rekey {
                     let mut roots = false;
                     for r in rows.iter_mut() {
+                        super::retained_rows::reinit_row(u, each_arm, r, frames)?;
                         roots |= update_row(u, r, frames, 0, body)?;
                     }
                     return Ok(roots);
@@ -144,7 +147,7 @@ impl RegionInst {
                             ..Default::default()
                         };
                         if let Some(r) = rows.get_mut(position) {
-                            changed |= Self::update_item(u, r, frames, frame, body)?;
+                            changed |= Self::update_item(u, each_arm, r, frames, frame, body)?;
                         } else {
                             let slots = new_row_slots(plan, arm, body, &mut slots_needed);
                             frame.region = Some(self.region.0);
@@ -205,7 +208,7 @@ impl RegionInst {
                     // count of equal keys earlier in this same sequence.
                     let mut roots = false;
                     for (r, (_, _, _, frame)) in rows.iter_mut().zip(keyed) {
-                        roots |= Self::update_item(u, r, frames, frame, body)?;
+                        roots |= Self::update_item(u, each_arm, r, frames, frame, body)?;
                     }
                     self.subject = Some(subject);
                     return Ok(roots);
@@ -259,10 +262,23 @@ impl RegionInst {
                         .map(|at| by_key[at]);
                     let existing = found.and_then(|i| old[i].take());
                     frame.region = Some(self.region.0);
+                    let existing = match existing {
+                        None => super::retained_rows::take(
+                            u,
+                            each_arm,
+                            &mut self.kept,
+                            &key_text,
+                            dup,
+                            frames,
+                            frame.clone(),
+                            body,
+                        )?,
+                        e => e,
+                    };
                     match existing {
                         Some(mut r) => {
                             roots |= found != Some(position);
-                            roots |= Self::update_item(u, &mut r, frames, frame, body)?;
+                            roots |= Self::update_item(u, each_arm, &mut r, frames, frame, body)?;
                             next.push(r);
                         }
                         None => {
@@ -290,7 +306,7 @@ impl RegionInst {
                     }
                 }
                 for gone in old.into_iter().flatten() {
-                    destroy_all(u, gone.roots);
+                    super::retained_rows::leave(u, &mut self.kept, gone, frames);
                 }
                 *rows = next;
                 self.subject = Some(subject);
@@ -302,6 +318,7 @@ impl RegionInst {
 
     fn update_item(
         u: &mut Update<'_>,
+        arm: Option<ArmsId>,
         r: &mut Row,
         frames: &[Frame],
         mut frame: Frame,
@@ -321,6 +338,7 @@ impl RegionInst {
         frame.region = r.frame.region;
         frame.row = r.slots.clone();
         r.frame = frame;
+        super::retained_rows::reinit_row(u, arm, r, frames)?;
         update_row(u, r, frames, dirty, body)
     }
 
@@ -343,6 +361,13 @@ impl RegionInst {
             let dirty = crate::compare::changed_fields(&frame.bound, &new_frame.bound);
             if dirty != 0 {
                 frame.bound = new_frame.bound;
+            }
+            if let (Some(i), Some(slots)) = (*arm, frame.row.as_ref()) {
+                if super::retained_rows::reinit() {
+                    if let Some(id) = plan.region(region).arms.iter().nth(i) {
+                        init_owned(u, id, slots, &with_frame(frames, frame.scope()))?;
+                    }
+                }
             }
             let saved = u.enter(dirty, frame.row.as_ref());
             let result = update_all(u, roots, &with_frame(frames, frame.scope()));
@@ -388,6 +413,7 @@ impl RegionInst {
     }
 
     pub(super) fn destroy(self, u: &mut Update<'_>) {
+        super::retained_rows::destroy(u, self.kept);
         match self.active {
             Active::Arm { roots, .. } => destroy_all(u, roots),
             Active::Rows { rows } => {

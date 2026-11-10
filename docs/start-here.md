@@ -81,6 +81,10 @@ the two differ, and draws `home.diff.png`, so neither picture needs viewing. On 
 `agent ios` is the app as a person sees it, UIKit's bars included, with screenshots a pixel a
 point (`--scale 3`: the device's): no other simulator tool is needed ([ios-driving](recipes/ios-driving.md)).
 
+For a slow interaction, follow [fast-interactions](recipes/fast-interactions.md):
+measure the input-to-screen path, bound what it invalidates, and verify behavior
+and appearance before accepting a performance rule.
+
 ## Look it up
 
 Look up what the nearest pattern (a tested app) lacks:

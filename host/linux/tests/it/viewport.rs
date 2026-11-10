@@ -1,5 +1,55 @@
 use exact_runner::{DataError, Value};
 
+#[test]
+fn resize_callbacks_skip_removed_observers_and_keep_survivors() {
+    use exact_linux::{presenter::PainterChoice, Presenter};
+    let plan = contract::compile(
+        r#"component App
+  state shown = true
+  state removedCalls = 0
+  state survivingWidth = 0
+  action parent(w: number, h: number, r: DOMRectReadOnly)
+    shown = w <= 100
+  action removed(w: number, h: number, r: DOMRectReadOnly)
+    removedCalls = removedCalls + 1
+  action surviving(w: number, h: number, r: DOMRectReadOnly)
+    survivingWidth = w
+  view
+    column width="100%" resize=parent
+      if shown
+        view width="100%" height=20 resize=removed testId="removed"
+      view width="100%" height=20 resize=surviving
+"#,
+    )
+    .unwrap();
+    let (mut presenter, error) = Presenter::boot_with(
+        &plan.encode(),
+        (),
+        (100., 100.),
+        1.,
+        std::path::PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(
+        presenter.host().runner().slot("removedCalls"),
+        Some(&Value::Number(1.))
+    );
+    for (width, calls) in [(200., 1.), (100., 2.)] {
+        let error = presenter.resize(width, 100.);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(
+            presenter.host().runner().slot("removedCalls"),
+            Some(&Value::Number(calls))
+        );
+        assert_eq!(
+            presenter.host().runner().slot("survivingWidth"),
+            Some(&Value::Number(width.into()))
+        );
+    }
+}
+
 // @ref LLP 1039 §5 — native layout and the resource share one viewport.
 #[test]
 fn viewport_resize_reanswers_before_native_layout() {

@@ -546,14 +546,19 @@ pub trait TextMeasurer {
     }
 
     /// Revision of host measuring traits (scale, content size, legibility,
-    /// appearance). A change invalidates native button offers even if fonts
-    /// and the tree stay the same. Hosts without changing traits return zero.
+    /// appearance). A change invalidates native button offers and field
+    /// chrome even if fonts and the tree stay the same: a final answer is
+    /// kept until the control's own inputs or this revision change, so a
+    /// host whose answer to the same request would differ changes it. Hosts
+    /// without changing traits return zero.
     fn measure_revision(&self) -> u64 {
         0
     }
 
     /// Native field chrome (LLP 1104 D5). Existing/painted measurers answer
-    /// no chrome until they implement their own control look.
+    /// no chrome until they implement their own control look. Asked again
+    /// while the answer is provisional, and after
+    /// [`TextMeasurer::measure_revision`] changes.
     fn field_chrome(&mut self, _request: &crate::FieldChromeRequest) -> crate::FieldChrome {
         crate::FieldChrome::default()
     }

@@ -143,7 +143,7 @@ impl Collection {
 
 /// Whether this scope is a virtualized list's row: an inner list's (LLP
 /// 1070), whose first rows are bounded by its own literal size.
-pub(super) fn in_collection_row(plan: &Plan, frames: &[Frame]) -> bool {
+pub(in crate::instance) fn in_collection_row(plan: &Plan, frames: &[Frame]) -> bool {
     frames.iter().filter_map(|f| f.region).any(|region| {
         let region = plan.region(RegionsId(region));
         region.kind == RegionKind::Each

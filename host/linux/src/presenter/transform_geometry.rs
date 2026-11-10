@@ -221,7 +221,9 @@ impl<D: DataSource> Presenter<D> {
             };
             depth = shallowest + 1;
             for (view, rect, _) in due {
-                self.host.runner_mut().resize_delivered(view, rect);
+                if !self.host.runner_mut().resize_delivered(view, rect) {
+                    continue;
+                }
                 let now = self.host.now();
                 let dispatched = self.host.dispatch_at(view, Event::Resize(rect), now);
                 let after = self.after_commit();

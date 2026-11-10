@@ -18,6 +18,17 @@ impl TextMeasurer for Fields {
         state.1.push(request.clone());
         state.0
     }
+    /// A test changes the answer in place: another answer to the same
+    /// request is another revision, as a host's changed traits are.
+    fn measure_revision(&self) -> u64 {
+        let c = self.0.borrow().0;
+        [c.top, c.right, c.bottom, c.left, c.minimum_height]
+            .iter()
+            .fold(u64::from(c.provisional), |hash, edge| {
+                hash.wrapping_mul(31)
+                    .wrapping_add(u64::from(edge.to_bits()))
+            })
+    }
 }
 fn font(size: f32, id: u16) -> ControlFont {
     ControlFont {

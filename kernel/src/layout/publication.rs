@@ -327,10 +327,8 @@ pub fn compute(
     let (flow_passes, flow_comparisons) =
         tree.settle_flow(root, root_slot, offer, arena, measurer)?;
     crate::fragment::settle(arena, tree, measurer, root_slot, offer)?;
-    for (&node, record) in &tree.button_records {
-        if let Some(&slot) = tree.slots.get(&node) {
-            arena.button_bases.insert(slot, record.parent_width);
-        }
+    for (slot, width) in tree.take_button_bases() {
+        arena.button_bases.insert(slot, width);
     }
     let refitted = fit::settle(arena, tree);
     let mut receipt = publish(arena, tree, measurer, root_slot);

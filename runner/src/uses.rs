@@ -584,6 +584,15 @@ pub fn keeps_midi(plan: &Plan) -> bool {
 }
 
 fn runs_command(plan: &Plan, names: &[&str]) -> bool {
+    // A command names its host command by one of the plan's
+    // strings, so with none of `names` among them no body runs one, and the
+    // walk over every body is skipped.
+    if !plan.strings.iter().any(|s| {
+        let s: &str = s;
+        names.contains(&s)
+    }) {
+        return false;
+    }
     let mut runs = false;
     plan.each_code(&mut |code| {
         runs = runs

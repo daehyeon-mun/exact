@@ -1245,6 +1245,12 @@ fn main() {
     let _ = writeln!(w, "    pub fn validate(&self) -> Result<(), PlanError> {{");
     let _ = writeln!(w, "        let strings = self.strings.len() as u64; let code_len = self.code.len() as u64; let data_len = self.data.len() as u64;");
     let _ = writeln!(w, "        let _ = (strings, code_len, data_len);");
+    // Expanded components share bytecode. Framing and operand indices depend
+    // on the plan and full range, while semantic checks still visit every row.
+    let _ = writeln!(
+        w,
+        "        let mut checked_code = std::collections::HashSet::new();"
+    );
     for f in &schema.header {
         if f.codec != "string" {
             let Codec::Opt(t) = parse_codec(&f.codec) else {
@@ -1266,7 +1272,7 @@ fn main() {
                 Codec::Idx(tt) => format!("if r.{f}.0 as usize >= self.{tt}.len() {{ return Err(at(\"{f}\")); }}", f = f.name),
                 Codec::Opt(tt) => format!("if let Some(v) = r.{f} {{ if v.0 as usize >= self.{tt}.len() {{ return Err(at(\"{f}\")); }} }}", f = f.name),
                 Codec::Range(tt) => format!("if r.{f}.start as u64 + r.{f}.len as u64 > self.{tt}.len() as u64 {{ return Err(at(\"{f}\")); }}", f = f.name),
-                Codec::Code => format!("if r.{f}.offset as u64 + r.{f}.len as u64 > code_len {{ return Err(at(\"{f}\")); }} self.check_code(r.{f}).map_err(|e| e.at(\"{}\", i as u32, \"{f}\"))?;", t.name, f = f.name),
+                Codec::Code => format!("if r.{f}.offset as u64 + r.{f}.len as u64 > code_len {{ return Err(at(\"{f}\")); }} if checked_code.insert((r.{f}.offset, r.{f}.len)) {{ self.check_code(r.{f}).map_err(|e| e.at(\"{}\", i as u32, \"{f}\"))?; }}", t.name, f = f.name),
                 Codec::Bytes => format!("if r.{f}.offset as u64 + r.{f}.len as u64 > data_len {{ return Err(at(\"{f}\")); }}", f = f.name),
                 Codec::F64 => format!("if !r.{f}.is_finite() {{ return Err(at(\"{f}\")); }}", f = f.name),
                 _ => String::new(),

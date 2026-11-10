@@ -21,8 +21,12 @@ pub(crate) fn resolve(
     touched: &mut Vec<NodeKey>,
     receipt: &mut CommitReceipt,
 ) {
+    // Whether every relative row must be resolved again (an environment change), or only those
+    // of nodes this commit touched.
+    let mut all = false;
     if let Some(px) = arena.root_font_size_next.take() {
         if px != arena.document_style.font_size {
+            all = true;
             arena.document_style.font_size = px;
             if px == MEDIUM {
                 arena.document_style.mask = arena
@@ -78,6 +82,7 @@ pub(crate) fn resolve(
     if let Some(scale) = arena.display_scale_next.take() {
         arena.display_scale = Some(scale);
         if arena.env().border_scale.is_some_and(|old| old != scale) {
+            all = true;
             let mut env = arena.env().clone();
             env.border_scale = Some(scale);
             arena.set_env(env);
@@ -108,6 +113,7 @@ pub(crate) fn resolve(
         .take()
         .filter(|on| *on != arena.bold_text)
     {
+        all = true;
         arena.bold_text = on;
         let rows = StyleMask::of(StyleId::FontWeight);
         let slots: Vec<u32> = arena.iter_live().collect();
@@ -119,6 +125,7 @@ pub(crate) fn resolve(
     if arena.relative_slots.is_empty() {
         return;
     }
+    all = all || environment_moved(arena);
     let device = crate::style::relative::device_pixel(arena.display_scale.unwrap_or(1.0));
     let depth = |arena: &NodeArena, mut slot: u32| {
         let mut depth = 0u32;
@@ -128,14 +135,35 @@ pub(crate) fn resolve(
         }
         depth
     };
+    // A node's relative rows resolve against its own rows, its parent's font size and the environment. A commit
+    // changes the first two only for nodes it touches (a style set, an inherited value changed, a move), so the
+    // others keep what they resolved to. Nodes touched by a resolution below join as it goes.
+    // An `em` row resolves against the parent's font size even where the node sets its own, which an inherited
+    // change does not reach: a touched node's children are dirty too.
+    let mut dirty: crate::id::IdSet<NodeKey> = Default::default();
+    if !all {
+        for key in touched.iter() {
+            if dirty.insert(*key) {
+                if let Some(s) = arena.resolve(*key) {
+                    dirty.extend(arena.children(s).iter().map(|c| arena.key(*c)));
+                }
+            }
+        }
+    }
     let mut slots: Vec<(u32, u32)> = arena
         .relative_slots
         .iter()
         .map(|slot| (depth(arena, slot), slot))
         .collect();
+    if slots.is_empty() {
+        return;
+    }
     slots.sort_unstable();
     let root = arena.document_style.font_size;
     for (_, slot) in slots {
+        if !all && !dirty.contains(&arena.key(slot)) {
+            continue;
+        }
         let parent = arena
             .control_text_start(slot)
             .filter(|s| s.mask.has(StyleId::FontSize))
@@ -181,6 +209,31 @@ pub(crate) fn resolve(
         arena.update_exclusion_count(slot, excluded);
         style_changed(arena, layout, slot, changed, receipt);
         touched.push(arena.key(slot));
+        let from = touched.len();
         propagate_inherited(arena, layout, slot, changed, touched, receipt);
+        if !all {
+            for key in touched[from..]
+                .iter()
+                .chain(std::iter::once(&arena.key(slot)))
+            {
+                dirty.insert(*key);
+                if let Some(s) = arena.resolve(*key) {
+                    dirty.extend(arena.children(s).iter().map(|c| arena.key(*c)));
+                }
+            }
+        }
     }
+}
+
+/// Relative rows depend on the environment, display scale, root font size and Bold Text.
+fn environment_moved(arena: &mut NodeArena) -> bool {
+    let now = (
+        arena.env().clone(),
+        arena.display_scale,
+        arena.document_style.font_size,
+        arena.bold_text,
+    );
+    let moved = arena.relative_environment.as_ref() != Some(&now);
+    arena.relative_environment = Some(now);
+    moved
 }

@@ -60,6 +60,7 @@ impl Kernel {
                 layout.mark_dirty(node);
             }
         }
+        self.controls_all_changed();
         !owners.is_empty()
     }
 

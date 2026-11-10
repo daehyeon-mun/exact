@@ -16,6 +16,9 @@ mod alert;
 mod buttons;
 #[cfg(test)]
 mod containment_tests;
+mod controls;
+#[cfg(test)]
+mod controls_tests;
 #[cfg(test)]
 mod differential_tests;
 #[cfg(test)]
@@ -30,7 +33,9 @@ mod order;
 mod publication;
 mod rebuild;
 mod table;
+mod unmirrored;
 pub use publication::compute;
+pub use unmirrored::Unmirrored;
 
 use crate::id::{IdMap, IdSet};
 use crate::shared_style::{engine_hash, Interner};
@@ -135,6 +140,11 @@ pub struct LayoutTree {
     field_chrome: IdMap<NodeId, crate::FieldChrome>,
     field_minima: IdMap<NodeId, f32>,
     button_records: IdMap<NodeId, buttons::ButtonRecord>,
+    // Each record's node by its slot, for the measure of a leaf, and the
+    // buttons whose containing width a layout changed, until it is published.
+    button_nodes: IdMap<u32, NodeId>,
+    button_based: Vec<NodeId>,
+    controls: controls::Controls,
     provisional_chrome: bool,
     slots: IdMap<NodeId, u32>,
     // Generated alert title items, keyed by their authored owning slot. They
@@ -250,12 +260,9 @@ pub trait LayoutMirror {
 
 impl LayoutMirror for LayoutTree {
     fn new_leaf(&mut self, arena: &NodeArena, slot: u32, measured: bool) -> Option<NodeId> {
-        Some(LayoutTree::new_leaf(
-            self,
-            taffy_style(arena, slot),
-            slot,
-            measured,
-        ))
+        let node = LayoutTree::new_leaf(self, taffy_style(arena, slot), slot, measured);
+        self.note_control(arena, slot, node);
+        Some(node)
     }
 
     fn new_leaf_unstyled(&mut self, slot: u32, measured: bool) -> Option<NodeId> {
@@ -269,6 +276,7 @@ impl LayoutMirror for LayoutTree {
 
     fn restyle(&mut self, arena: &NodeArena, slot: u32, node: NodeId) {
         self.restyle_with(arena, slot, node);
+        self.note_control(arena, slot, node);
         // The title's box follows its alert's grouping (layout/alert.rs)
         if let Some(prefix) = self.alert_prefixes.get(&slot).copied() {
             self.write_style(prefix, alert::prefix_style(arena.grouped_alert(slot)));
@@ -303,6 +311,7 @@ impl LayoutMirror for LayoutTree {
 
     fn mark_dirty(&mut self, node: NodeId) {
         LayoutTree::mark_dirty(self, node);
+        self.touch_control(node);
     }
 
     #[cfg(test)]
@@ -316,43 +325,6 @@ impl LayoutMirror for LayoutTree {
 
     fn tree_ref(&self) -> Option<&LayoutTree> {
         Some(self)
-    }
-}
-
-/// A commit's engine when the kernel mirrors none: new nodes get no engine
-/// node, so no other call reaches it.
-pub struct Unmirrored;
-
-impl LayoutMirror for Unmirrored {
-    fn new_leaf(&mut self, _: &NodeArena, _: u32, _: bool) -> Option<NodeId> {
-        None
-    }
-
-    fn new_leaf_unstyled(&mut self, _: u32, _: bool) -> Option<NodeId> {
-        None
-    }
-
-    fn restyle(&mut self, _: &NodeArena, _: u32, _: NodeId) {}
-
-    fn sync_children(&mut self, _: &NodeArena, _: u32, _: NodeId) -> usize {
-        0
-    }
-
-    fn remove(&mut self, _: NodeId) {}
-
-    fn mark_dirty(&mut self, _: NodeId) {}
-
-    #[cfg(test)]
-    fn attached(&self, _: NodeId) -> bool {
-        false
-    }
-
-    fn tree(&mut self) -> Option<&mut LayoutTree> {
-        None
-    }
-
-    fn tree_ref(&self) -> Option<&LayoutTree> {
-        None
     }
 }
 
@@ -386,6 +358,9 @@ impl LayoutTree {
             field_chrome: IdMap::default(),
             field_minima: IdMap::default(),
             button_records: IdMap::default(),
+            button_nodes: IdMap::default(),
+            button_based: Vec::new(),
+            controls: Default::default(),
             provisional_chrome: false,
             slots: IdMap::default(),
             alert_prefixes: IdMap::default(),
@@ -506,9 +481,11 @@ impl LayoutTree {
         self.field_chrome.remove(&node);
         self.field_minima.remove(&node);
         self.button_records.remove(&node);
+        self.forget_control(node);
         self.deferred.remove(&node);
         self.walks.remove(&node);
         if let Some(slot) = self.slots.remove(&node) {
+            self.button_nodes.remove(&slot);
             if let Some(anon) = self.tables.forget(slot) {
                 self.remove(anon);
             }
@@ -564,6 +541,7 @@ impl LayoutTree {
             self.repositioned(node);
         }
         self.clear_measurements(node);
+        self.restyled_control(node);
         self.taffy.track_layout_input(node, replayable(&style));
         let style = self.share(style);
         self.taffy.set_style_unmarked(node, style);
@@ -642,6 +620,7 @@ impl LayoutTree {
     /// Replace a node's ordered children. A child taken from another parent
     /// invalidates both at once; otherwise this is the parent's content.
     pub fn set_children(&mut self, parent: NodeId, children: &[NodeId]) {
+        self.children_above_controls(parent, children);
         self.children_changing(parent);
         self.hoists_stale |= !self.absolutes.is_empty();
         self.clear_measurements(parent);
@@ -902,12 +881,18 @@ impl LayoutTree {
         // Resolve percentage trees under this layout's environment.
         let _env = crate::style::LayoutEnv::set(arena.env());
         self.refresh_tables(arena, node_for);
-        self.prepare_fields(root, arena, measurer)?;
-        let buttons = self.prepare_buttons(root, arena, measurer)?;
+        // The native controls a change reached since they were last asked.
+        let ready = self.stale_controls(root, arena, measurer.measure_revision());
+        let prepared = (self.prepare_fields(&ready, arena, measurer))
+            .and_then(|()| self.prepare_buttons(&ready, arena, measurer));
+        if prepared.is_err() {
+            self.ask_controls_again(&ready);
+        }
+        prepared?;
         // Percentage padding uses the containing block's final width. Settle
         // its frame floor in the engine before publication, never after paint.
         for _ in 0..3 {
-            let minima = self.compute_pass(root, offer, arena, measurer, node_for, &buttons)?;
+            let minima = self.compute_pass(root, offer, arena, measurer, node_for)?;
             if !self.settle_field_minima(minima) {
                 return Ok(());
             }
@@ -927,7 +912,6 @@ impl LayoutTree {
         // engine's whole pass, Taffy's algorithms with it, again into every
         // app (LLP 1047.001; LLP 1075.003 §9.11's trial tree did, +0.4 MB).
         node_for: &dyn Fn(u32) -> Option<NodeId>,
-        buttons: &IdMap<u32, NodeId>,
     ) -> Result<IdMap<NodeId, f32>, LayoutError> {
         if let Some(fault) = &self.fault {
             return Err(LayoutError::Engine(fault.clone()));
@@ -990,17 +974,18 @@ impl LayoutTree {
         let mut runs_slot = None;
         let mut invalid_metrics = None;
         let mut invalid_button = None;
-        let mut provisional_button = false;
+        // The buttons a stand-in answered for: asked again at the next layout.
+        let mut provisional_buttons = Vec::new();
         let mut fitted = Vec::new();
         let height_free = measurer.height_free();
-        let chrome = &self.field_chrome;
+        let (chrome, buttons) = (&self.field_chrome, &self.button_nodes);
         let mut minima = IdMap::default();
         let baselines_unread: IdSet<_> = boundaries
             .iter()
             .filter(|(node, _, _)| self.baselines_unread(*node))
             .map(|(node, _, _)| *node)
             .collect();
-        let button_records = &mut self.button_records;
+        let (button_records, based) = (&mut self.button_records, &mut self.button_based);
         #[cfg(test)]
         let leaves = &mut self.work.1;
         let mut measure = |inputs: LayoutInput,
@@ -1041,8 +1026,10 @@ impl LayoutTree {
                 .filter(|c| matches!(c.kind, alert::Kind::Node))
                 .and_then(|c| buttons.get(&c.slot))
                 .and_then(|n| button_records.get_mut(n))
+                .filter(|r| r.parent_width != inputs.parent_size.width)
             {
                 record.parent_width = inputs.parent_size.width;
+                based.push(node);
             }
 
             let inset = style
@@ -1122,7 +1109,9 @@ impl LayoutTree {
                                 invalid_button.get_or_insert_with(|| arena.local_id(slot));
                                 return Size::ZERO;
                             }
-                            provisional_button |= answer.provisional;
+                            if answer.provisional {
+                                provisional_buttons.push(node);
+                            }
                             return Size {
                                 width: known
                                     .width
@@ -1345,7 +1334,10 @@ impl LayoutTree {
             .compute_layout_with_measure(root, available, &mut measure);
         result.map_err(|e| LayoutError::Engine(format!("compute_layout: {e:?}")))?;
         self.fitting.extend(fitted);
-        self.provisional_chrome |= provisional_button;
+        self.provisional_chrome |= !provisional_buttons.is_empty();
+        for node in provisional_buttons {
+            self.ask_control_again(node);
+        }
         if let Some(view) = invalid_button {
             return Err(LayoutError::InvalidButtonMeasure(view));
         }
@@ -1364,6 +1356,19 @@ impl LayoutTree {
 
     pub(crate) fn button_containing_width(&self, node: NodeId) -> Option<Option<f32>> {
         self.button_records.get(&node).map(|r| r.parent_width)
+    }
+
+    /// The buttons whose containing width changed since this was last
+    /// asked, each with its slot and that width.
+    pub(super) fn take_button_bases(&mut self) -> Vec<(u32, Option<f32>)> {
+        let based = std::mem::take(&mut self.button_based);
+        let width = |n: &NodeId| {
+            Some((
+                *self.slots.get(n)?,
+                self.button_records.get(n)?.parent_width,
+            ))
+        };
+        based.iter().filter_map(width).collect()
     }
 
     // The absolute frame publication will write, computed the same way

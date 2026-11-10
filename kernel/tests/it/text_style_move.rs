@@ -80,3 +80,38 @@ fn a_move_under_a_said_weight_reweights_a_bare_style_below() {
     let after = k.node(5).unwrap().paragraph_stamp().unwrap();
     assert!(!after.same_metrics(&before), "remeasured at the new weight");
 }
+
+#[test]
+fn a_detached_subtree_resolves_the_parent_that_changed_while_it_was_away() {
+    let mut k = Kernel::with_monospace();
+    k.apply(
+        0,
+        0,
+        &[
+            Op::CreateView {
+                id: 1,
+                node_type: NodeType::View,
+            },
+            Op::CreateView {
+                id: 2,
+                node_type: NodeType::Text,
+            },
+            patch(1, &[(StyleId::FontWeight, StyleValue::Number(400.0))]),
+            children(1, &[2]),
+            Op::AttachRoot { id: 1 },
+        ],
+    )
+    .unwrap();
+    k.apply(0, 1, &[children(1, &[])]).unwrap();
+    k.apply(
+        0,
+        2,
+        &[patch(
+            1,
+            &[(StyleId::FontWeight, StyleValue::Number(700.0))],
+        )],
+    )
+    .unwrap();
+    k.apply(0, 3, &[children(1, &[2])]).unwrap();
+    assert_eq!(k.node(2).unwrap().text_style().font_weight, 700);
+}

@@ -32,9 +32,11 @@ pub struct PlanBuilder {
     plan: Plan,
     interned: HashMap<String, StrId, BuildHasherDefault<BodyHasher>>,
     /// Every code body appended so far, by content: an identical body is
-    /// shared. Each reference is validated on its own (`check_code`), so a
-    /// shared body is indistinguishable from a copy to every reader.
+    /// shared. Validation checks each distinct range's framing and operands,
+    /// and every reference's semantics, as it does for separate copies.
     bodies: HashMap<Vec<u8>, Code, BuildHasherDefault<BodyHasher>>,
+    /// Identical expression lists share rows, not their evaluated values.
+    arguments: HashMap<Vec<Code>, ArgsRange, BuildHasherDefault<BodyHasher>>,
     /// The design's values (`theme` rows' and slices'), interned at
     /// [`finish`](Self::finish) after every other string: a value-only edit
     /// then moves no other string's id, so the plan's structure
@@ -49,8 +51,8 @@ enum ValueAt {
     Slice(usize),
 }
 
-/// A multiply-rotate hash for the pools' dedup tables: code bodies this
-/// builder assembled and the plan's own strings, so no key is adversarial
+/// A multiply-rotate hash for this builder's code, argument lists and
+/// strings, so no key is adversarial
 /// and SipHash's cost buys nothing.
 #[derive(Default)]
 struct BodyHasher(u64);
@@ -88,6 +90,7 @@ impl PlanBuilder {
             },
             interned: HashMap::default(),
             bodies: HashMap::with_capacity_and_hasher(256, Default::default()),
+            arguments: HashMap::default(),
             values: Vec::new(),
         };
         // These eight distinct stack ids are part of the plan vocabulary.
@@ -120,6 +123,7 @@ impl PlanBuilder {
             plan,
             interned,
             bodies: HashMap::default(),
+            arguments: HashMap::default(),
             values: Vec::new(),
         }
     }
@@ -704,16 +708,21 @@ impl PlanBuilder {
         self.plan.tools.push(row);
     }
 
-    /// A run of argument expressions.
+    /// A run of argument expressions, shared when every code range matches.
     pub fn args(&mut self, exprs: &[Code]) -> ArgsRange {
+        if let Some(range) = self.arguments.get(exprs) {
+            return *range;
+        }
         let start = self.plan.args.len() as u32;
         for expr in exprs {
             self.plan.args.push(ArgsRow { expr: *expr });
         }
-        ArgsRange {
+        let range = ArgsRange {
             start,
             len: exprs.len() as u32,
-        }
+        };
+        self.arguments.insert(exprs.to_vec(), range);
+        range
     }
 
     /// An action: parameters, the slots it writes, and its body.

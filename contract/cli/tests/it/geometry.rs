@@ -273,7 +273,7 @@ fn resize_given_an_action_is_the_element_resize_event_and_a_string_is_css() {
     let deeper = r.resize_due(due[0].2 + 1);
     assert_eq!(deeper.iter().map(|d| d.0).collect::<Vec<_>>(), [inner]);
     for (v, rect, _) in due {
-        r.resize_delivered(v, rect);
+        assert!(r.resize_delivered(v, rect));
         r.dispatch(v, exact_runner::Event::Resize(rect)).unwrap();
     }
     assert!(r.resize_due(0).is_empty(), "each size once");

@@ -78,10 +78,10 @@ impl Tree {
         width: f64,
         height: f64,
     ) -> Option<(Value, f64)> {
-        if !self.has_collections {
+        if !self.lists.any {
             return None;
         }
-        let c = find_collection(&self.children, view)?;
+        let c = find_collection(&self.children, &self.lists, view)?;
         let (at, port) = match c.axis {
             ListAxis::Vertical => (top, height),
             ListAxis::Horizontal => (left, width),
@@ -149,19 +149,19 @@ impl Tree {
     }
     /// One list's snapshot ([`Tree::collections`]'s entry for `view`).
     pub fn collection(&self, view: ViewId) -> Option<CollectionSnapshot> {
-        if !self.has_collections {
+        if !self.lists.any {
             return None;
         }
-        find_collection(&self.children, view).map(Collection::snapshot)
+        find_collection(&self.children, &self.lists, view).map(Collection::snapshot)
     }
     /// `view`'s mounted rows as (wrapper, epoch) into `out` (cleared first):
     /// which rows are mounted and bound to what, without their geometry.
     pub fn collection_mounted(&self, view: ViewId, out: &mut Vec<(ViewId, u64)>) {
         out.clear();
-        if !self.has_collections {
+        if !self.lists.any {
             return;
         }
-        if let Some(collection) = find_collection(&self.children, view) {
+        if let Some(collection) = find_collection(&self.children, &self.lists, view) {
             out.extend(collection.mounted.iter().map(|r| (r.wrapper, r.epoch)));
         }
     }
@@ -169,60 +169,42 @@ impl Tree {
     /// x, with no snapshot: what a host compares between layouts to know
     /// whose rows its data moved.
     pub fn collection_data(&self) -> Vec<(ViewId, u64, bool)> {
-        if !self.has_collections {
+        if !self.lists.any {
             return Vec::new();
         }
         let mut out = Vec::new();
-        let mut stack: Vec<_> = self.children.iter().collect();
+        let mut stack = Vec::new();
+        self.lists.push(&mut stack, &self.children);
         while let Some(child) = stack.pop() {
-            match child {
-                Child::Node(node) => {
-                    if let Some(collection) = node.collection() {
-                        out.push((
-                            collection.view,
-                            collection.data_generation,
-                            collection.axis == super::ListAxis::Horizontal,
-                        ));
-                        collection.add_children(&mut stack);
-                    }
-                    stack.extend(node.children.iter());
+            if let Child::Node(node) = child {
+                if let Some(collection) = node.collection() {
+                    out.push((
+                        collection.view,
+                        collection.data_generation,
+                        collection.axis == super::ListAxis::Horizontal,
+                    ));
+                    collection.add_children(&mut stack);
                 }
-                Child::Region(region) => match &region.active {
-                    Active::Arm { roots, .. } => stack.extend(roots.iter()),
-                    Active::Rows { rows } => {
-                        for row in rows {
-                            stack.extend(row.roots.iter());
-                        }
-                    }
-                },
             }
+            self.lists.push_below(&mut stack, child);
         }
         out
     }
     fn collections_with(&self, rows: usize) -> Vec<CollectionSnapshot> {
-        if !self.has_collections {
+        if !self.lists.any {
             return Vec::new();
         }
         let mut out = Vec::new();
-        let mut stack: Vec<_> = self.children.iter().collect();
+        let mut stack = Vec::new();
+        self.lists.push(&mut stack, &self.children);
         while let Some(child) = stack.pop() {
-            match child {
-                Child::Node(node) => {
-                    if let Some(collection) = node.collection() {
-                        out.push(collection.snapshot_rows(rows));
-                        collection.add_children(&mut stack);
-                    }
-                    stack.extend(node.children.iter());
+            if let Child::Node(node) = child {
+                if let Some(collection) = node.collection() {
+                    out.push(collection.snapshot_rows(rows));
+                    collection.add_children(&mut stack);
                 }
-                Child::Region(region) => match &region.active {
-                    Active::Arm { roots, .. } => stack.extend(roots.iter()),
-                    Active::Rows { rows } => {
-                        for row in rows {
-                            stack.extend(row.roots.iter());
-                        }
-                    }
-                },
             }
+            self.lists.push_below(&mut stack, child);
         }
         out.sort_by_key(|c| c.view);
         out
@@ -236,7 +218,7 @@ impl Tree {
         max_traversal: usize,
         max_json_bytes: usize,
     ) -> Result<Vec<CollectionSnapshot>, &'static str> {
-        if !self.has_collections {
+        if !self.lists.any {
             return Ok(Vec::new());
         }
         let mut stack = Vec::new();
@@ -355,14 +337,14 @@ impl Tree {
         feedback: CollectionFeedback,
         fill: CollectionFill,
     ) -> Result<(bool, Option<CollectionEdges>), InstanceError> {
-        if !self.has_collections {
+        if !self.lists.any {
             self.last_work = u.work;
             return Ok((false, None));
         }
         feedback
             .validate()
             .map_err(|_| invalid("invalid collection feedback"))?;
-        let Some(target) = find_collection(&self.children, feedback.view) else {
+        let Some(target) = find_collection(&self.children, &self.lists, feedback.view) else {
             self.last_work = u.work;
             return Ok((false, None));
         };
@@ -387,18 +369,18 @@ impl Tree {
     }
     /// [`Collection::reveal_at`] for list `view`.
     pub(crate) fn show_collection(&mut self, u: &mut Update<'_>, view: ViewId, offset: f64) {
-        if let Some(collection) = find_collection_mut(&mut self.children, view) {
+        if let Some(collection) = find_collection_mut(&mut self.children, &self.lists, view) {
             collection.reveal_at(u, offset);
         }
     }
     pub(crate) fn has_collection(&self, view: ViewId) -> bool {
-        find_collection(&self.children, view).is_some()
+        find_collection(&self.children, &self.lists, view).is_some()
     }
     /// Publish one fresh set of host measurement identities after a deferred
     /// edge's state change settles. No keys, data or row bodies are evaluated.
     /// Reuses the hosts' bounded feedback scheduling, even for unchanged rows.
     pub(crate) fn wake_collection_edge(&mut self, view: ViewId) -> Result<(), InstanceError> {
-        if let Some(collection) = find_collection_mut(&mut self.children, view) {
+        if let Some(collection) = find_collection_mut(&mut self.children, &self.lists, view) {
             for row in &mut collection.mounted {
                 row.epoch = advance(&mut collection.next_epoch)?;
             }
@@ -409,7 +391,7 @@ impl Tree {
     /// A refused action did not consume its edge. Retry only on later accepted
     /// host feedback, never by redispatching inside the current call.
     pub(crate) fn rearm_collection_edge(&mut self, view: ViewId, event: EventKind) {
-        if let Some(collection) = find_collection_mut(&mut self.children, view) {
+        if let Some(collection) = find_collection_mut(&mut self.children, &self.lists, view) {
             let index = match event {
                 EventKind::Reachstart => 0,
                 EventKind::Reachend => 1,
@@ -420,7 +402,7 @@ impl Tree {
     }
     /// Consume the second candidate after the runner established a pure no-op.
     pub(crate) fn take_collection_end(&mut self, view: ViewId) -> bool {
-        let Some(collection) = find_collection_mut(&mut self.children, view) else {
+        let Some(collection) = find_collection_mut(&mut self.children, &self.lists, view) else {
             return false;
         };
         if !collection.edge_armed[1] {
@@ -497,34 +479,34 @@ fn feedback_walk(
     Ok(None)
 }
 
-fn find_collection(children: &[Child], view: ViewId) -> Option<&Collection> {
-    let mut stack: Vec<_> = children.iter().collect();
+fn find_collection<'a>(
+    children: &'a [Child],
+    lists: &ListSites,
+    view: ViewId,
+) -> Option<&'a Collection> {
+    let mut stack = Vec::new();
+    lists.push(&mut stack, children);
     while let Some(child) = stack.pop() {
-        match child {
-            Child::Node(node) => {
-                if let Some(collection) = node.collection() {
-                    if collection.view == view {
-                        return Some(collection);
-                    }
-                    collection.add_children(&mut stack);
+        if let Child::Node(node) = child {
+            if let Some(collection) = node.collection() {
+                if collection.view == view {
+                    return Some(collection);
                 }
-                stack.extend(node.children.iter());
+                collection.add_children(&mut stack);
             }
-            Child::Region(region) => match &region.active {
-                Active::Arm { roots, .. } => stack.extend(roots.iter()),
-                Active::Rows { rows } => {
-                    for row in rows {
-                        stack.extend(row.roots.iter());
-                    }
-                }
-            },
         }
+        lists.push_below(&mut stack, child);
     }
     None
 }
 
-fn find_collection_mut(children: &mut [Child], view: ViewId) -> Option<&mut Collection> {
-    let mut stack: Vec<_> = children.iter_mut().collect();
+fn find_collection_mut<'a>(
+    children: &'a mut [Child],
+    lists: &ListSites,
+    view: ViewId,
+) -> Option<&'a mut Collection> {
+    let on_path = |c: &&mut Child| lists.may_hold(c);
+    let mut stack: Vec<_> = children.iter_mut().filter(on_path).collect();
     while let Some(child) = stack.pop() {
         match child {
             Child::Node(node) => {
@@ -537,13 +519,13 @@ fn find_collection_mut(children: &mut [Child], view: ViewId) -> Option<&mut Coll
                         stack.extend(row.row.roots.iter_mut());
                     }
                 }
-                stack.extend(node.children.iter_mut());
+                stack.extend(node.children.iter_mut().filter(on_path));
             }
             Child::Region(region) => match &mut region.active {
-                Active::Arm { roots, .. } => stack.extend(roots.iter_mut()),
+                Active::Arm { roots, .. } => stack.extend(roots.iter_mut().filter(on_path)),
                 Active::Rows { rows } => {
                     for row in rows {
-                        stack.extend(row.roots.iter_mut());
+                        stack.extend(row.roots.iter_mut().filter(on_path));
                     }
                 }
             },
@@ -703,6 +685,92 @@ pub(in crate::instance) struct InnerSites {
     regions: std::collections::HashSet<RegionsId>,
 }
 
+/// The plan sites on a path from the plan's roots down to a list that can
+/// be virtualized, the lists included: a walk of the instance tree looking
+/// for the mounted lists enters nothing else, so it costs the lists and the
+/// boxes above them, not the app.
+#[derive(Debug, Default)]
+pub(in crate::instance) struct ListSites {
+    /// Whether the plan has such a list at all.
+    pub(in crate::instance) any: bool,
+    nodes: Vec<bool>,
+    regions: Vec<bool>,
+}
+
+impl ListSites {
+    pub(in crate::instance) fn of(plan: &Plan) -> ListSites {
+        let off = [
+            exact_plan::Opcode::Bool as u8,
+            0,
+            exact_plan::Opcode::Return as u8,
+        ];
+        // A constant `virtualized=false` stays an ordinary eager list.
+        let opts_in = |b: exact_plan::BindingsRow| {
+            b.kind == BindingKind::Prop
+                && b.id == PropId::Virtualized as u16
+                && plan.code(b.expr) != off
+        };
+        let mut sites = ListSites {
+            any: plan.bindings.iter().any(opts_in),
+            nodes: vec![false; plan.nodes.len()],
+            regions: vec![false; plan.regions.len()],
+        };
+        for (i, node) in plan.nodes.iter().enumerate() {
+            let list = node.bindings.iter().any(|id| opts_in(plan.binding(id)));
+            let mut at = list.then_some(Site::Node(NodesId(i as u32)));
+            while let Some(site) = at {
+                let (seen, parent, arm) = match site {
+                    Site::Node(n) => {
+                        let row = plan.node(n);
+                        (&mut sites.nodes[n.0 as usize], row.parent, row.arm)
+                    }
+                    Site::Region(r) => {
+                        let row = plan.region(r);
+                        (&mut sites.regions[r.0 as usize], row.parent, row.arm)
+                    }
+                };
+                if std::mem::replace(seen, true) {
+                    break;
+                }
+                at = match (parent, arm) {
+                    (Some(node), _) => Some(Site::Node(node)),
+                    (None, Some(arm)) => Some(Site::Region(plan.arm(arm).region)),
+                    (None, None) => None,
+                };
+            }
+        }
+        sites
+    }
+
+    /// Whether a list can be at or under `child`.
+    fn may_hold(&self, child: &Child) -> bool {
+        match child {
+            Child::Node(node) => self.nodes[node.node.0 as usize],
+            Child::Region(region) => self.regions[region.region.0 as usize],
+        }
+    }
+
+    /// Push those of `children` a list can be at or under.
+    fn push<'a>(&self, stack: &mut Vec<&'a Child>, children: &'a [Child]) {
+        stack.extend(children.iter().filter(|c| self.may_hold(c)));
+    }
+
+    /// [`ListSites::push`] for what `child` holds outside any list's rows.
+    fn push_below<'a>(&self, stack: &mut Vec<&'a Child>, child: &'a Child) {
+        match child {
+            Child::Node(node) => self.push(stack, &node.children),
+            Child::Region(region) => match &region.active {
+                Active::Arm { roots, .. } => self.push(stack, roots),
+                Active::Rows { rows } => {
+                    for row in rows {
+                        self.push(stack, &row.roots);
+                    }
+                }
+            },
+        }
+    }
+}
+
 impl InnerSites {
     /// Whether an inner list can be at or under `child`.
     pub(in crate::instance) fn may_hold(&self, child: &Child) -> bool {
@@ -753,7 +821,7 @@ pub(in crate::instance) fn invalidate_typography(
 
 impl Tree {
     pub(crate) fn reorder_collection(&self, view: ViewId) -> Option<&Collection> {
-        find_collection(&self.children, view)
+        find_collection(&self.children, &self.lists, view)
     }
     pub(crate) fn edit_reorder<T>(
         &mut self,
@@ -860,4 +928,35 @@ fn first_root_bounded<'a>(
 /// The mounted collections as a batch's JSON, through [`super::super::LISTS`].
 pub(in crate::instance) fn collections_json(tree: &Tree) -> String {
     super::snapshots_json(&tree.collections())
+}
+
+#[cfg(test)]
+mod list_sites_tests {
+    use super::ListSites;
+
+    /// One list in an `if` arm of a row's column, among `filler` columns.
+    fn marked(filler: usize) -> usize {
+        let mut source = String::from(
+            "component App\n  state on = true\n  view\n    column\n      row\n        if on\n          list virtualized=true height=80\n            for x in range(9) key=x\n              column\n                text `${x}`\n",
+        );
+        for i in 0..filler {
+            source.push_str(&format!("      column\n        text \"{i}\"\n"));
+        }
+        let plan = contract::compile(&source).expect("the fixture compiles");
+        let sites = ListSites::of(&plan);
+        assert!(sites.any);
+        sites
+            .nodes
+            .iter()
+            .chain(&sites.regions)
+            .filter(|on| **on)
+            .count()
+    }
+
+    #[test]
+    fn only_the_sites_above_a_list_are_marked_whatever_the_plan_s_size() {
+        // The root column, the row, the `if` and the list.
+        assert_eq!(marked(0), 4);
+        assert_eq!(marked(2_000), 4);
+    }
 }

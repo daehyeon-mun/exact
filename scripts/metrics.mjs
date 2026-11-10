@@ -11,6 +11,10 @@
  *       web/src/bin/metrics.rs, --press <testId>[,<testId>] names the update to time
  *   bun scripts/metrics.mjs --flow     Stage 2 still/serial-propagation layouts, no browser
  *   bun scripts/metrics.mjs --scaling  runner workloads (300/3000/10000 rows), no browser
+ *   bun scripts/metrics.mjs --commit-scale  one input's commit on generated apps of 1,000 to 20,000
+ *       nodes (static, with state, with native controls, with a list, hovered, mounting a few nodes),
+ *       on the Linux host with no display and on the Apple host's Rust: flat as the app grows, or over
+ *       budget
  *   bun scripts/metrics.mjs --list-memory  fresh-process eager/virtualized heap/RSS comparison (25/1000/25000)
  *   bun scripts/metrics.mjs --list-memory --collections --repeats 3 --json
  *       paired eager/virtualized rows, actual kernel geometry, twenty full traversals
@@ -50,6 +54,7 @@ import { developmentBuildEnv, resolveApp, withAppFixture } from './app.mjs';
 import { Cdp, open } from './agent.mjs';
 import { chromium } from './agent-launch.mjs';
 import { childFailure as failure, failureSummary } from './agent-build.mjs';
+import { COMMIT_SCALE_LIMIT, COMMIT_SCALE_RUNS, commitScaleEmit, commitScaleVerdicts } from './commit-scale.mjs';
 
 const t0 = Date.now();
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
@@ -202,7 +207,7 @@ const appName = process.argv.includes('--app') ? process.argv[process.argv.index
 const app = resolveApp(appName);
 // The child uses the captured scripts and inputs; only this invocation's
 // resolved root bypasses capture. Foreign inherited markers cannot do so.
-if (!process.argv.includes('--flow') && !process.argv.includes('--scaling') && !process.argv.includes('--list-memory') && process.env.EXACT_DIAGNOSTIC_ROOT !== ROOT) {
+if (!process.argv.includes('--flow') && !process.argv.includes('--scaling') && !process.argv.includes('--commit-scale') && !process.argv.includes('--list-memory') && process.env.EXACT_DIAGNOSTIC_ROOT !== ROOT) {
   const code = await withAppFixture(app, async ({ exactRoot, env }) => {
     // The captured source excludes node_modules. Resolve the pinned toolchain
     // inside this private checkout, rather than borrowing the live workspace.
@@ -377,6 +382,37 @@ if (process.argv.includes('--scaling')) {
     console.log(out.scaling_note);
   }
   process.exit(0);
+}
+// The framework's own gate (`scripts/commit-scale.mjs`): an input that changes one node costs the same
+// commit whatever the app's size, so the largest app's p50 over the smallest's is held to the
+// budget, host by host and series by series. A slope is a pass over the whole tree, the whole
+// app's state, or every native control or list.
+if (process.argv.includes('--commit-scale')) {
+  out.commit_scale = [];
+  const notes = [];
+  for (const { package: crate, example } of COMMIT_SCALE_RUNS) {
+    const run = spawnSync('cargo', ['run', '-q', '--profile', 'host-dev', '-p', crate, '--example', example],
+      { cwd: ROOT, encoding: 'utf8', env: developmentBuildEnv(), maxBuffer: 64 << 20 });
+    if (run.status !== 0) { console.error(run.error?.message ?? run.stderr); process.exit(run.status ?? 1); }
+    const reply = JSON.parse(run.stdout.trim().split('\n').pop());
+    out.commit_scale.push(...reply.commit_scale);
+    notes.push(reply.commit_scale_note);
+  }
+  out.commit_scale_note = notes.join(' | ');
+  const stated = `flat: at most ${COMMIT_SCALE_LIMIT}×`;
+  out.commit_scale_budget = { stated, limit: COMMIT_SCALE_LIMIT, series: commitScaleVerdicts(out.commit_scale) };
+  if (json) console.log(JSON.stringify(out));
+  else {
+    console.log(`One-op commit as the app grows — ${JSON.stringify(out.identity)}`);
+    for (const r of out.commit_scale) {
+      const emit = commitScaleEmit(r, out.commit_scale);
+      const parts = r.runner_commit_ms ? `; runner ${r.runner_commit_ms.p50}; layout ${r.kernel_layout_ms.p50}` : '';
+      console.log(`  ${r.host} ${r.series} ${r.nodes} nodes (${r.live_nodes} live): host commit ${r.host_commit_ms.p50}/${r.host_commit_ms.p95} ms p50/p95${parts}${emit === null ? '' : `; host's own ${emit.toFixed(4)}`}`);
+    }
+    for (const v of out.commit_scale_budget.series) console.log(`  ${v.host} ${v.series}: ${v.largest} nodes cost ${v.ratio.toFixed(2)}× the commit of ${v.smallest} (budget ${stated}): ${v.within ? 'within' : 'OVER'}`);
+    console.log(out.commit_scale_note);
+  }
+  process.exit(out.commit_scale_budget.series.every(v => v.within) ? 0 : 1);
 }
 // Fixed kernel workload, independent of the selected app. The focused mode
 // uses this worktree; the ordinary run uses the captured source above.

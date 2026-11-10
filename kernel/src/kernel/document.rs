@@ -208,6 +208,7 @@ impl Kernel {
         self.receipts.push_back(RetainedReceipt::new(&receipt));
         if changed {
             self.wide_changed();
+            self.controls_changed(&receipt);
         }
         receipt
     }
