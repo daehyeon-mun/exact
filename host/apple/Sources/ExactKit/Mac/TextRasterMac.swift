@@ -87,6 +87,28 @@ final class TextRasterizer {
         return true
     }
 
+    /// `ensure(_:urgent: true)` for every paragraph a pass found on screen without pixels. First pixels are drawn
+    /// before the frame, so the main thread waits for them; drawn one after another there, the texts a batch mounts
+    /// (a dialog's, a page's) cost the frame the sum of their rasters. Here each is drawn as a replacement is, from
+    /// its source on whichever thread takes it (a cached line stays on the thread that made it), and the main
+    /// thread waits once for all of them.
+    func ensureVisible(_ nodes: [NodeView]) {
+        var jobs: [(node: NodeView, key: TextRasterKey, job: TextRasterJob)] = []
+        for node in nodes {
+            guard nodes.count > 2, node.rastersText, !(node.textRasterFailed && node.textRasterKey != nil), node.textRaster == nil else { ensure(node, urgent: true); continue }
+            let key = key(node)
+            guard node.textRasterKey != key || !node.textRasterReady, let job = prepare(node, key: key) else { ensure(node, urgent: true); continue }
+            jobs.append((node, key, job))
+        }
+        guard !jobs.isEmpty else { return }
+        var images = [TextRasterImage?](repeating: nil, count: jobs.count)
+        images.withUnsafeMutableBufferPointer { out in
+            nonisolated(unsafe) let out = out, jobs = jobs
+            DispatchQueue.concurrentPerform(iterations: jobs.count) { out[$0] = Self.render(jobs[$0].job, firstPixels: true) }
+        }
+        for (entry, image) in zip(jobs, images) { entry.node.showTextRaster(image?.surface, for: entry.key, frame: image?.frame, cast: image?.cast) }
+    }
+
     // One visible replacement set at a time, on the existing raster workers.
     // The main thread reads results only after both workers leave the group.
     private final class Replacement {
@@ -285,8 +307,11 @@ extension NodeView {
     /// sublayer so it can escape the layout box, subject to authored clipping.
     func presentTextRaster() {
         guard !textRasterUsesStrips, let layer, let surface = textRaster else { return }
-        CATransaction.begin()
+        // No implicit animation, in the transaction the turn has. A transaction of its own, begun where none is
+        // open, commits the window's layers as it ends: once for each paragraph a pass presents.
+        let actions = CATransaction.disableActions()
         CATransaction.setDisableActions(true)
+        defer { CATransaction.setDisableActions(actions) }
         // A `text-shadow` is cast by a sublayer of its own: the view's layer
         // would cast its box too (LLP 1077 D3).
         let shadow = textRasterKey.flatMap { $0.spec.hdrShadow == nil ? $0.spec.shadow : nil }
@@ -314,7 +339,6 @@ extension NodeView {
             ink.applyTextCast(textRasterCast, headroom: textRasterCast.map(TextRasterJob.headroom) ?? 0, limit: style["dynamic_range_limit"]?.string)
         }
         textRasterPending = false
-        CATransaction.commit()
         presenter?.boxFilters.changed(self)
         repaintThrough()
     }

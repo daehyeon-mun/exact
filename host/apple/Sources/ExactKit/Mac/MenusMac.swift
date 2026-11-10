@@ -181,7 +181,7 @@ final class MenuHost: NSObject {
     var presentedConfirmation: Confirmation? { entries.last?.confirmation }
     func owns(_ node: NodeView) -> Bool { entries.contains { $0.popover === node && $0.menu == nil } }
     /// Input inheritance follows the authored tree after top-layer reparenting.
-    func parent(of view: NSView) -> NSView? { authoredParent(of: view) ?? view.superview }
+    func parent(of view: NSView) -> NSView? { authoredParent(of: view) ?? view.structuralSuperview }
     /// An open popover's authored parent, nil for any other view.
     func authoredParent(of view: NSView) -> NSView? {
         entries.first(where: { $0.popover === view && $0.menu == nil })?.parent
@@ -208,7 +208,7 @@ final class MenuHost: NSObject {
     private func connected(_ view: NSView) -> Bool {
         guard let presenter else { return false }
         let out = { (at: NSView) -> NSView? in
-            self.authoredParent(of: at) ?? (at as? NodeView).flatMap { presenter.blocks.owns($0) ? presenter.blocks.parent(of: $0) : nil } ?? at.superview
+            self.authoredParent(of: at) ?? (at as? NodeView).flatMap { presenter.blocks.owns($0) ? presenter.blocks.parent(of: $0) : nil } ?? at.structuralSuperview
         }
         let paged = sequence(first: view, next: out).contains { $0 === presenter.root }
         return paged || presenter.dialogs.presented.contains { contains($0, view) }
@@ -234,7 +234,8 @@ final class MenuHost: NSObject {
         var accessibilityChanges: Set<UInt32>?
         if let scopes {
             var nodes: [NodeView] = []
-            for root in scopes where presenter.views[root.id] === root { MenuHost.nodes(under: root, into: &nodes) }
+            // A closed popover's rows are read when it opens (`NavigationHost.shownAgain`).
+            for root in scopes where presenter.views[root.id] === root { if root.isHidden { nodes.append(root) } else { MenuHost.nodes(under: root, into: &nodes) } }
             presenter.navigation.refreshInputGates(nodes)
             var changed = Set(nodes.map(\.id))
             // Ancestor names can read this subtree; syncAccessibility also follows external references.
@@ -245,7 +246,7 @@ final class MenuHost: NSObject {
             }
             accessibilityChanges = changed
         } else {
-            presenter.navigation.refreshInputGates(Array(presenter.views.values))
+            presenter.navigation.refreshAllInputGates()
         }
         // A popover's show or hide is one subtree's change, as a batch is: the
         // visible text rebuild coalesces to the turn's end, the key-view loop is
@@ -356,7 +357,7 @@ final class MenuHost: NSObject {
               source.map({ !(bubbled ? $0.authoredInert : $0.inert) && !(contextMenu ? $0.formDisabled : $0.disabled) }) ?? true,
               pop.style["display"]?.string != "none", let page = presenter.viewport.window,
               source.map({ !hidden($0) || presenter.toolbar.contains($0) }) ?? true else { return }
-        let window = source?.window.flatMap { presenter.hosts($0) ? $0 : nil } ?? page
+        let window = source?.structuralWindow.flatMap { presenter.hosts($0) ? $0 : nil } ?? page
         for old in leaving where old.node === pop { old.finish() }
         // Only auto popovers form a dismissible stack. A manual popover does
         // not close that stack when shown, or get closed by another auto.
@@ -392,7 +393,7 @@ final class MenuHost: NSObject {
             // Leave native tracking until the click and its app batch finish.
             RunLoop.main.perform(inModes: [.common]) { [weak self, weak source, weak entry] in
                 guard let self, let entry, self.entries.contains(where: { $0 === entry }) else { return }
-                guard let source, self.live(source), self.live(entry.popover), source.window === window,
+                guard let source, self.live(source), self.live(entry.popover), source.structuralWindow === window,
                       !(entry.bubbled ? source.authoredInert : source.inert), !source.disabled,
                       !entry.bubbled || !entry.popover.inert, entry.confirmation.map(self.valid) ?? true
                 else { self.close(entry.popover); return }
@@ -554,6 +555,7 @@ final class MenuHost: NSObject {
         popovers.removeAll(); presentations.removeAll()
         pointerDown = nil; escapeHeld = false
     }
+    func rehome(from old: NSView, to new: NSView) { for entry in entries where entry.parent === old { entry.parent = new } }
     func children(_ parent: NSView, _ wanted: [NodeView]) {
         for entry in entries {
             let index = wanted.firstIndex(where: { $0 === entry.popover })
@@ -963,13 +965,13 @@ final class MenuHost: NSObject {
     /// presented again since.
     private func valid(_ pick: Pick) -> Bool {
         guard !pick.cancelled, let row = pick.row, let pop = pick.pop, live(row), live(pop),
-              row.isDescendant(of: pop), row.isButton, !row.disabled, !row.inert,
+              row.isWithin(pop), row.isButton, !row.disabled, !row.inert,
               title(of: row) == pick.title else { return false }
         var popovers: [NodeView] = []
         for (i, step) in pick.path.enumerated() {
             let next = i + 1 < pick.path.count ? pick.path[i + 1].parent : pop
             guard let opener = step.opener, let parent = step.parent, let next, live(opener), live(parent),
-                  opener.isDescendant(of: parent), opens(opener, next), submenu(of: opener, path: popovers + [parent]) === next,
+                  opener.isWithin(parent), opens(opener, next), submenu(of: opener, path: popovers + [parent]) === next,
                   !opener.disabled, !opener.inert else { return false }
             popovers.append(parent)
         }

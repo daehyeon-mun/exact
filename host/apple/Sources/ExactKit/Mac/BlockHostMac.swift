@@ -174,6 +174,11 @@ final class BlockHost {
         tell([(node.id, nil)], shows: entry.placeholder ? [(node.id, false)] : [])
     }
 
+    /// A hidden node's children left the window or came back (`ParkingMac.swift`): a subtree whose home they are returns to where they are now.
+    func rehome(from old: NSView, to new: NSView) {
+        for (id, entry) in entries where entry.home === old { entries[id]?.home = new }
+    }
+
     /// The batch's `block` op: a block's used size.
     func applied(_ op: BatchOp) {
         if op.payload["op"] as? String == "block" { rects[op.id] = op.blockRect } // none: no block

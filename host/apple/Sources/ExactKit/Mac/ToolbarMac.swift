@@ -387,9 +387,9 @@ final class WindowToolbarHost: NSObject, NSToolbarDelegate, NSToolbarItemValidat
         while let view = ancestor {
             if let node = view as? NodeView, node.style["display"]?.string == "none" { return false }
             if view.isHidden && !(projected && view === owner) && !besideParts.contains(where: { $0.node === view }) { return false }
-            ancestor = view.superview
+            ancestor = view.structuralSuperview
         }
-        return node.window != nil
+        return node.structuralWindow != nil
     }
 
     func contains(_ node: NodeView) -> Bool {
@@ -398,16 +398,16 @@ final class WindowToolbarHost: NSObject, NSToolbarDelegate, NSToolbarItemValidat
     }
 
     func suppresses(_ node: NodeView) -> Bool {
-        if besideParts.contains(where: { node === $0.node || node.isDescendant(of: $0.node) }) { return true }
+        if besideParts.contains(where: { node.isWithin($0.node) }) { return true }
         guard projected, let owner else { return false }
-        return node === owner || node.isDescendant(of: owner)
+        return node.isWithin(owner)
     }
 
     /// Whether what the bar shows of `node` can be used now: the toolbar is
     /// the window's, the node is shown as authored and neither inert nor
     /// disabled, and no sheet is over the window.
     private func usable(_ node: NodeView) -> Bool {
-        guard let window, let toolbar, window.toolbar === toolbar, node.window === window else { return false }
+        guard let window, let toolbar, window.toolbar === toolbar, node.structuralWindow === window else { return false }
         return visible(node) && !node.inert && !node.disabled && window.attachedSheet == nil
     }
 

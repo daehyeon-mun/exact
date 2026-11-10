@@ -8,6 +8,13 @@ final class NavigationHost {
     private var gates: [UInt32: [Bool]] = [:]
     /// The tabpanels a root last hid or showed: one it stops naming shows again.
     private var panels: Set<UInt32> = []
+    /// What a hidden node inherited as it went hidden (`inherited`), while nothing above it has changed since: its
+    /// subtree's gates are then what they were, and showing it again visits none of it. An empty one never matches.
+    private var settled: [UInt32: [Bool]] = [:]
+    /// The nodes asked for their gates while a hidden node was above them, by that node: they are asked again when it shows.
+    private var owed: [UInt32: Set<UInt32>] = [:]
+    /// The nodes shown again since the last refresh (`shownAgain`).
+    private var resumed: Set<UInt32> = []
     /// Each root's stack as last shown, its keys through its selected route.
     private var shown: [UInt32: [String]] = [:]
     /// The ops that can change what hides or disables a node: a frame, a
@@ -64,6 +71,7 @@ final class NavigationHost {
     func groundChanged() { for ground in grounds.values { ground.needsDisplay = true }; split.groundChanged() }
     func reset() {
         refused.removeAll(); gates.removeAll(); panels.removeAll(); shown.removeAll(); selection = nil; barRoute = false; root = nil; routeless = false
+        settled.removeAll(); owed.removeAll(); resumed.removeAll()
         sheets = []; keptSheets.removeAll(); split.reset()
         for ground in grounds.values { ground.removeFromSuperview() }
         grounds.removeAll()
@@ -101,7 +109,7 @@ final class NavigationHost {
             if op.op == .create || op.op == .children || op.op == .props { split.rowsChanged = true }
             if op.op == .style || op.op == .frame, let id = op.nodeID { split.restyled(id) }
             if let id = op.nodeID {
-                if op.op == .destroy { gates.removeValue(forKey: id); refused.removeValue(forKey: id); shown.removeValue(forKey: id); keptSheets.removeValue(forKey: id) }
+                if op.op == .destroy { gates.removeValue(forKey: id); refused.removeValue(forKey: id); shown.removeValue(forKey: id); keptSheets.removeValue(forKey: id); settled.removeValue(forKey: id); owed.removeValue(forKey: id) }
                 else if Self.gating.contains(op.op) { touched.insert(id) }
             }
             // A children op names retained siblings too. Only changed ancestry
@@ -112,12 +120,16 @@ final class NavigationHost {
             }
         }
         func gate(_ node: NodeView, hidden: Bool, inert: Bool) {
-            if node.isHidden != hidden || node.routeInert != inert { subtrees.insert(node.id) }
-            node.isHidden = hidden
-            node.routeInert = inert
+            // A route hidden with its inertness, or shown again with it, changes no gate under it that is read while
+            // it is hidden (`hiddenNow`, `shownAgain`): only the route is visited, not every node of its page.
+            let covered = node.isHidden != hidden && (hidden ? !node.routeInert && inert : node.routeInert && !inert)
+            if covered { routed.insert(node.id) } else if node.isHidden != hidden || node.routeInert != inert { subtrees.insert(node.id) }
+            // Shown, it is read with the inertness it has then; hidden, with the one it had.
+            if hidden { node.isHidden = true; node.routeInert = inert } else { node.routeInert = inert; node.isHidden = false }
         }
         var managed = Set<UInt32>()
         var grounded = Set<UInt32>()
+        var routed = Set<UInt32>()
         let roots = presenter.carrying("navigationBack")
         selection = nil
         barRoute = false
@@ -199,17 +211,27 @@ final class NavigationHost {
         for id in Array(grounds.keys) where !grounded.contains(id) { grounds.removeValue(forKey: id)?.removeFromSuperview() }
         // Reuse the presenter's ancestor inert gate for focus/input. AppKit's
         // accessibility subtree is suppressed as HTML inert suppresses it.
-        for id in touched {
+        for id in touched.union(routed) {
             guard let node = presenter.views[id] else { continue }
             let gate = [node.isHidden, node.routeInert, node.props["inert"] == "true", node.props["accessibilityElementsHidden"] == "true"]
-            if let old = gates[id], old != gate { subtrees.insert(id) }
+            // Hidden or shown alone is `hiddenNow`'s and `shownAgain`'s to answer, as a route's change above is.
+            if let old = gates[id], old.dropFirst() != gate.dropFirst(), !routed.contains(id) { subtrees.insert(id) }
             gates[id] = gate
         }
-        func descendants(_ view: NSView) {
-            if let node = view as? NodeView { touched.insert(node.id) }
+        touched.formUnion(routed)
+        func descendants(_ view: NSView, top: Bool = false) {
+            if let node = view as? NodeView {
+                touched.insert(node.id)
+                // What a hidden node holds is not read while it is hidden. It is all read when it shows.
+                if node.isHidden, !top { settled[node.id] = []; return }
+            }
             for child in view.subviews { descendants(child) }
         }
-        for id in subtrees { if let node = presenter.views[id] { descendants(node) } }
+        for id in subtrees {
+            guard let node = presenter.views[id] else { continue }
+            owed[id] = nil
+            if node.isHidden { settled[id] = []; touched.insert(id) } else { settled[id] = nil; descendants(node, top: true) }
+        }
         // The placeholder the split's pane shows is out of its route's views: its gates follow its authored ancestors'.
         if let lifted = split.shownPlaceholder, !subtrees.isEmpty,
            presenter.logicalAncestry(of: lifted).contains(where: { ($0 as? NodeView).map { subtrees.contains($0.id) } ?? false }) {
@@ -222,6 +244,58 @@ final class NavigationHost {
         refreshInputGates(touched.compactMap { presenter.views[$0] })
     }
 
+    /// Before a batch mounts children: a route a root is about to mount that is not the one it names goes hidden
+    /// first, so its page is built outside the window and enters it when it is first shown. Only the plain case is
+    /// read (one stack, no modal route, never the stack's first route, which a split shows as its list): `sync`
+    /// decides, and shows what this hid in error.
+    func pregate(_ batch: Batch) {
+        for op in batch.ops where op.op == .children {
+            guard let root = presenter.views[op.id], root.props["navigationBack"] != nil, let key = root.props["navigationKey"] else { continue }
+            let routes = op.ids.compactMap { presenter.views[UInt32($0)] }.filter { $0.props["navigationKey"] != nil }
+            guard let named = routes.first(where: { $0.props["navigationKey"] == key }), named.props["navigationPresentation"] == nil else { continue }
+            for route in routes.dropFirst() where route !== named && route.superview == nil && !route.isHidden && route.props["navigationPresentation"] == nil {
+                route.isHidden = true
+            }
+        }
+    }
+
+    /// What `node`'s subtree inherits through it: every gate `refreshInputGatesOnce` reads above a node.
+    private func inherited(_ node: NodeView) -> [Bool] { [node.inert, node.accessibilityInert, node.accessibilityHiddenByProp] }
+
+    /// `node` went hidden (`NodeView.hiddenChanged`). Nothing under a hidden node takes input or is served to an
+    /// assistive client, so its subtree keeps the gates it has, and the focus leaves it.
+    func hiddenNow(_ node: NodeView) {
+        settled[node.id] = inherited(node)
+        resumed.remove(node.id)
+        guard let window = node.window, let responder = window.firstResponder as? NSView, responder.isDescendant(of: node) else { return }
+        window.makeFirstResponder(nil)
+    }
+    /// `node` shows again: at the next refresh the nodes asked while it was hidden are asked again, and every node
+    /// under it when what it inherits is not what it was.
+    func shownAgain(_ node: NodeView) { resumed.insert(node.id) }
+
+    /// The nodes owed a refresh under the nodes shown again, with those nodes.
+    private func resuming() -> [NodeView] {
+        guard !resumed.isEmpty else { return [] }
+        var nodes: [NodeView] = []
+        for id in resumed {
+            guard let node = presenter.views[id], !node.isHidden else { continue }
+            let asked = owed.removeValue(forKey: id) ?? []
+            if let was = settled.removeValue(forKey: id), !was.isEmpty, was == inherited(node) {
+                nodes.append(node)
+                nodes += asked.compactMap { presenter.views[$0] }
+            } else { MenuHost.nodes(under: node, into: &nodes) }
+        }
+        resumed.removeAll()
+        return nodes
+    }
+
+    /// Every node under no hidden one: an open or closed modal dialog changes what each inherits. A hidden node's
+    /// subtree is left as it is: what the node inherits then is compared when it shows (`resuming`).
+    func refreshAllInputGates() {
+        refreshInputGates(presenter.views.values.filter { !($0.isHiddenOrHasHiddenAncestor && !$0.isHidden) })
+    }
+
     /// Top-layer ownership changes the same native input/AX gates as inert.
     /// The focus leaves a node input no longer reaches (a hidden view, an
     /// inert one: authored, a route's, behind a dialog) and a control that
@@ -229,8 +303,12 @@ final class NavigationHost {
     /// from (`Presenter.tabStart`). `aria-hidden` takes a node out of the
     /// accessibility tree only, and the focus stays, as in Chrome.
     func refreshInputGates(_ nodes: [NodeView]) {
-        refreshInputGatesOnce(nodes)
+        refreshInputGatesOnce(nodes + resuming())
     }
+    /// A node shown again outside a batch is read at the end of its turn (`Parking.settle`).
+    func settle() { if !resumed.isEmpty { refreshInputGatesOnce(resuming()) } }
+    /// `node` is under hidden `root`: it is asked again when `root` shows.
+    fileprivate func owe(_ node: NodeView, under root: NodeView) { owed[root.id, default: []].insert(node.id) }
 }
 
 extension NavigationHost {
@@ -253,6 +331,15 @@ extension NavigationHost {
         var holders = Set<ObjectIdentifier>()
         var window: NSWindow?
         var responder: NSView?
+        // The nearest hidden node above a view, asked once for each view on the way up.
+        var hiders: [ObjectIdentifier: NodeView?] = [:]
+        func hider(above view: NSView) -> NodeView? {
+            guard let up = view.structuralSuperview else { return nil }
+            if let known = hiders[ObjectIdentifier(up)] { return known }
+            let answer = (up as? NodeView).flatMap { $0.isHidden ? $0 : nil } ?? hider(above: up)
+            hiders[ObjectIdentifier(up)] = answer
+            return answer
+        }
         for node in nodes {
             let inert = node.inert
             let hidden = node.isHiddenOrHasHiddenAncestor
@@ -264,10 +351,22 @@ extension NavigationHost {
                 while let at = v { holders.insert(ObjectIdentifier(at)); v = at.superview }
             }
             let focused = node.window != nil && holders.contains(ObjectIdentifier(node))
-            let axHidden = node.accessibilityInert || hidden || hiddenByProp(node)
-            // Compared with the last write by anyone (`accessibilityHiddenWritten`), so another projection's write is
-            // corrected too.
-            if node.accessibilityHiddenWritten != axHidden { node.setAccessibilityHidden(axHidden) }
+            // A view under a hidden one leaves the accessibility tree with it: the hidden view's parent serves it to
+            // no client (`exposed`), it serves no children of its own (`NodeView.accessibilityChildren`), and AppKit
+            // hit-tests no hidden view. So the hidden view alone carries the flag, and showing another route writes
+            // one flag for each route, not one for every node of both. A view shown again is read here again
+            // (`sync` visits the subtree of every gate that changed), which is when a change made under it lands.
+            if !(hidden && !node.isHidden) {
+                let axHidden = node.accessibilityInert || hidden || hiddenByProp(node)
+                // Compared with the last write by anyone (`accessibilityHiddenWritten`), so another projection's
+                // write is corrected too; a view AppKit was told nothing of is not hidden, so the first write is of
+                // a change.
+                if node.accessibilityHiddenWritten != axHidden { node.setAccessibilityHidden(axHidden) }
+            } else if let root = hider(above: node) {
+                // Under a hidden node nothing here is read: it is asked again when that node shows, as the flag is.
+                owe(node, under: root)
+                if !(focused && (unreachable || node.formDisabled)) { continue }
+            }
             let enabled = !node.disabled && !inert
             if let field = node.field, field.isEnabled != enabled { field.isEnabled = enabled }
             let editable = enabled && node.props["editable"] != "false"

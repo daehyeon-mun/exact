@@ -82,7 +82,7 @@ final class SidebarHost {
     /// their boxes are no place to click.
     func suppresses(_ node: NodeView) -> Bool {
         guard let projected else { return false }
-        return node === projected || node.isDescendant(of: projected)
+        return node.isWithin(projected)
     }
     /// Whether the window's toolbar holds the sidebar's button and its
     /// tracking separator: a sidebar is installed, and the author has not
@@ -201,7 +201,7 @@ final class SidebarHost {
         watched = [host.tablist.id]
         func watch(_ view: NSView) {
             if let node = view as? NodeView { watched.insert(node.id) }
-            view.subviews.forEach(watch)
+            view.structuralSubviews.forEach(watch)
         }
         host.tabs.forEach(watch)
         shown = Shown(tablist: host.tablist, label: host.tablist.authoredLabel,

@@ -32,6 +32,7 @@ extension NodeView {
     /// the colours assigned outside a draw are re-applied. @ref LLP 1034 D2
     package override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
+        followParkedAppearance()
         presenter?.tables.appearanceChanged(self); refreshGroupedSeparator(); presenter?.navigation.split.recolor(self)
         if let regions = presenter?.session?.regions, regions.owns(self) { regions.geometryChanged() }
         // An `svg`'s paints are resolved again; paint motion hears the appearance (LLP 1062 D4).

@@ -105,7 +105,7 @@ extension MenuHost {
     }
     private func presented(_ owner: Confirmation, _ entry: Confirmation.Presented) -> Bool {
         guard let action = entry.node, let pop = owner.popover, live(action) else { return false }
-        return closes(action, pop) && action.isDescendant(of: pop) && title(of: action) == entry.title
+        return closes(action, pop) && action.isWithin(pop) && title(of: action) == entry.title
             && choosable(action, in: pop) == entry.enabled
     }
 

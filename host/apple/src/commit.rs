@@ -13,12 +13,12 @@ impl<D: DataSource> Host<D> {
         self.retained_begin();
         self.native_retire_removed_owner(&mut batch);
         self.native_note_receipts(receipts);
-        let bulk_handlers = (receipts
-            .iter()
-            .map(|t| t.receipt.created.len())
-            .sum::<usize>()
-            > 1)
-        .then(|| self.runner.handlers());
+        // The created nodes' listeners: read for each, or, when the commits
+        // made much of the tree (a boot), from every live declaration at
+        // once, which costs every view the runner made.
+        let created: usize = receipts.iter().map(|t| t.receipt.created.len()).sum();
+        let bulk_handlers = (created > 1 && created > self.runner.kernel().live_count() / 8)
+            .then(|| self.runner.handlers());
         self.close_new_top_layer(receipts);
         for t in receipts {
             let r = &t.receipt;
@@ -29,7 +29,7 @@ impl<D: DataSource> Host<D> {
             for key in &r.destroyed {
                 if let Some(id) = self.keys.remove(key) {
                     self.retained_forget(id);
-                    self.ranks.remove(&id);
+                    self.forget_placed(id);
                     self.paint.runs.remove(&id);
                     if let Some((owner, _)) = self.inline_runs.remove(&id) {
                         self.dirty_paragraphs.insert(owner);
@@ -53,12 +53,14 @@ impl<D: DataSource> Host<D> {
                         |all| all.get(&id).cloned().unwrap_or_default(),
                     );
                     self.create(id, &handlers, &mut batch);
+                    self.changed_placed(id);
                 }
             }
             for key in &r.touched {
                 if let Some(node) = self.runner.kernel().node_by_key(*key) {
                     let id = node.id;
                     self.update(id, &mut batch);
+                    self.changed_placed(id);
                 }
             }
         }

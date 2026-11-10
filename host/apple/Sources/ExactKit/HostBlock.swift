@@ -50,6 +50,8 @@ extension Runtime {
     /// it again (kinds 14 and 15, LLP 1116.006 D2), in the same layout.
     func blocks(_ blocks: [(UInt32, HostBlock?)], placements: [(UInt32, BlockPlacement?)] = [], shows: [(UInt32, Bool)] = []) -> Batch {
         return on {
+            let before = exact_layout_stamp(rt)
+            defer { blocksStamps = (before, exact_layout_stamp(rt)) }
             var bytes = Data(capacity: (blocks.count + placements.count + shows.count) * 36)
             let append = { (words: [UInt32]) in
                 for word in words { withUnsafeBytes(of: word.littleEndian) { bytes.append(contentsOf: $0) } }

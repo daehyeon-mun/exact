@@ -47,7 +47,7 @@ struct NavigationTabs {
 
     /// The root's tabs, or nil when it has none (one stack).
     static func of(_ root: NodeView, _ presenter: Presenter) -> NavigationTabs? {
-        for list in presenter.carrying("role:tablist") where list.isDescendant(of: root) && owner(of: list) === root {
+        for list in presenter.carrying("role:tablist") where list.isWithin(root) && owner(of: list) === root {
             var tabs: [NodeView] = [], panels: [NodeView] = []
             for case let tab as NodeView in list.container.subviews where tab.props["accessibilityRole"] == "tab" {
                 guard let name = tab.props["accessibilityControls"],
@@ -64,10 +64,10 @@ struct NavigationTabs {
 
     /// The nearest ancestor of a node that is a route or a navigation root.
     private static func owner(of node: NodeView) -> NodeView? {
-        var at = node.superview
+        var at = node.structuralSuperview
         while let view = at {
             if let n = view as? NodeView, n.props["navigationKey"] != nil { return n }
-            at = view.superview
+            at = view.structuralSuperview
         }
         return nil
     }

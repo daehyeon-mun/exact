@@ -69,10 +69,10 @@ final class TableHost {
         if list.style["appearance"]?.string == "none" { return "appearance=\"none\": the author's rows" }
         guard list.props["listRows"] == "true" else { return "Contract leaves its authored rows (LLP 1115.000 D16)" }
         if list.handlers.contains("reorderdrop") { return "its rows are dragged to reorder, which the table does not do yet" }
-        var above = list.superview
+        var above = list.structuralSuperview
         while let view = above {
             if view is TableRowCell || (view as? NodeView)?.kind == "list" { return "it is inside another list's row" }
-            above = view.superview
+            above = view.structuralSuperview
         }
         return nil
     }
@@ -285,7 +285,7 @@ final class TableHost {
             var view: NSView? = op.nodeID.flatMap { presenter?.views[$0] }
             while let next = view, !(next is NSTableView) {
                 if let cell = next as? TableRowCell { cell.syncSelectionPaint(); break }
-                view = next.superview
+                view = next.structuralSuperview
             }
         }
     }

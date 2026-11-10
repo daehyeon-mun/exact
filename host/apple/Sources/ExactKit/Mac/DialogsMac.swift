@@ -115,8 +115,8 @@ final class DialogHost {
     }
     func show(_ dialog: NodeView) {
         guard let presenter, !owns(dialog), live(dialog), let window = presenter.viewport.window,
-              let parent = dialog.superview, parent.isDescendant(of: presenter.root) || parent === presenter.root
-                || entries.contains(where: { parent.isDescendant(of: $0.dialog) || parent === $0.dialog }) else { return }
+              let parent = dialog.superview, parent.isWithin(presenter.root)
+                || entries.contains(where: { parent.isWithin($0.dialog) }) else { return }
         // A confirmation in the alert shape is the platform's alert, a sheet
         // on the window (LLP 1115.000 D7.6, AlertsMac.swift). HTML: showModal
         // on an open modal dialog does nothing.
@@ -214,6 +214,7 @@ final class DialogHost {
     }
     /// A children op still addresses the authored parent, even while a dialog
     /// is in the top layer. Removing that edge retires its presentation.
+    func rehome(from old: NSView, to new: NSView) { for entry in entries where entry.parent === old { entry.parent = new } }
     func children(_ parent: NSView, _ wanted: [NodeView]) {
         // A route's sheet leaves after the batch (`syncRoutes`), never inside it.
         for entry in entries where !entry.route && (entry.parent === parent) != wanted.contains(where: { $0 === entry.dialog }) {
@@ -233,8 +234,8 @@ final class DialogHost {
         presenter.alerts.sync()
         for entry in entries where !entry.route {
             let parent = entry.parent
-            let connected = parent === presenter.root || parent?.isDescendant(of: presenter.root) == true
-                || entries.contains { other in other !== entry && (parent === other.dialog || parent?.isDescendant(of: other.dialog) == true) }
+            let connected = parent?.isWithin(presenter.root) == true
+                || entries.contains { other in other !== entry && parent?.isWithin(other.dialog) == true }
             if !live(entry.dialog) || entry.dialog.props["semanticTag"] != "dialog" || !connected || presenter.viewport.window == nil {
                 close(entry.dialog, notify: false)
             }
@@ -253,7 +254,7 @@ final class DialogHost {
     func refreshInputGates() {
         guard let presenter else { return }
         accessibilityBlocker = accessibleActive.map(ObjectIdentifier.init)
-        presenter.navigation.refreshInputGates(Array(presenter.views.values))
+        presenter.navigation.refreshAllInputGates()
         presenter.topLayerChanged()
     }
     func layout() {

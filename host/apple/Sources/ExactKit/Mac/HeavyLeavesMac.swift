@@ -151,10 +151,10 @@ final class HeavyLeaves {
         1 / Double(max(60, presenter.viewport.window?.screen?.maximumFramesPerSecond ?? 60))
     }
     private func list(holding node: NodeView) -> NodeView? {
-        var v = node.superview
+        var v = node.structuralSuperview
         while let current = v {
             if let n = current as? NodeView, n.kind == "list", presenter.collections.owns(n.id) { return n }
-            v = current.superview
+            v = current.structuralSuperview
         }
         return nil
     }

@@ -105,7 +105,7 @@ extension Presenter {
     func gridOrigin(above view: NSView) -> GridOrigin {
         guard let holder = view.superview else { return .zero }
         var ancestor: NSView? = holder
-        while let a = ancestor, !(a is NodeView) { ancestor = a.superview }
+        while let a = ancestor, !(a is NodeView) { ancestor = a.structuralSuperview }
         guard let node = ancestor as? NodeView, node.container === holder else { return .zero }
         return node.grid?.origin ?? .zero
     }

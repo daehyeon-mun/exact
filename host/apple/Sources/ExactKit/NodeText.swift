@@ -20,8 +20,8 @@ extension NodeView {
     /// The node box this view stands in: the nearest node view above it,
     /// past the containers and scroll views a box holds its children in.
     var nodeSuperview: NodeView? {
-        var at = superview
-        while let v = at, !(v is NodeView) { at = v.superview }
+        var at = structuralSuperview
+        while let v = at, !(v is NodeView) { at = v.structuralSuperview }
         return at as? NodeView
     }
 
@@ -52,7 +52,7 @@ extension NodeView {
     func decorationChanged(from old: NodeStyle) {
         let lines = style["text_decoration_line"], was = old["text_decoration_line"]
         guard lines != was || (lines != nil && old["text_color"] != style["text_color"]) else { return }
-        var stack: [PlatformView] = subviews
+        var stack: [PlatformView] = structuralSubviews
         while let v = stack.popLast() {
             if let node = v as? NodeView, node.isParagraph {
                 node.invalidateText()
@@ -62,7 +62,7 @@ extension NodeView {
                 node.setNeedsDisplay()
                 #endif
             }
-            stack.append(contentsOf: v.subviews)
+            stack.append(contentsOf: v.structuralSubviews)
         }
     }
     var paragraphOwner: NodeView { self }

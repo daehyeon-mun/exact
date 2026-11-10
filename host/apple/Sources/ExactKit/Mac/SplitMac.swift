@@ -540,7 +540,7 @@ final class SplitHost {
             if let node = view as? NodeView, node.window === pane.window {
                 return BlockPlacement(rect: node.convertNativePresentation(pane.bounds, from: pane), within: node.id)
             }
-            parent = view.superview
+            parent = view.structuralSuperview
         }
         return nil
     }

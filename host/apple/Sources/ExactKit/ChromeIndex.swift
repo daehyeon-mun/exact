@@ -21,6 +21,8 @@ struct ChromeIndex {
                          ("type:time", "type", "time"), ("type:datetime-local", "type", "datetime-local"),
                          ("type:button", "type", "button"), ("type:progress", "type", "progress")]
     private var byKey: [String: Set<UInt32>] = [:]
+    /// Moves when any key's views change: a pass that lists a key's views keeps its list while this stands.
+    private(set) var revision = 0
     /// The views carrying each `id` value, and the values whose carriers
     /// changed since `takeChangedNames` — what resolves a name without
     /// reading every named view.
@@ -46,22 +48,22 @@ struct ChromeIndex {
     mutating func note(_ id: UInt32, props: [String: String]) {
         rename(id, props["id"])
         for key in Self.keys {
-            if props[key] != nil { byKey[key, default: []].insert(id) }
+            if props[key] != nil { if byKey[key, default: []].insert(id).inserted { revision &+= 1 } }
             else if let index = byKey.index(forKey: key), byKey.values[index].contains(id) {
-                byKey.values[index].remove(id)
+                byKey.values[index].remove(id); revision &+= 1
             }
         }
         for (name, key, value) in Self.values {
-            if props[key] == value { byKey[name, default: []].insert(id) }
+            if props[key] == value { if byKey[name, default: []].insert(id).inserted { revision &+= 1 } }
             else if let index = byKey.index(forKey: name), byKey.values[index].contains(id) {
-                byKey.values[index].remove(id)
+                byKey.values[index].remove(id); revision &+= 1
             }
         }
     }
     mutating func forget(_ id: UInt32) {
         rename(id, nil)
         // Only the member sets change; dictionary keys and indices stay fixed.
-        for index in byKey.indices where byKey.values[index].contains(id) { byKey.values[index].remove(id) }
+        for index in byKey.indices where byKey.values[index].contains(id) { byKey.values[index].remove(id); revision &+= 1 }
     }
     func ids(_ key: String) -> Set<UInt32> { byKey[key] ?? [] }
     /// Whether anything that can hide a view or make it inert is mounted:

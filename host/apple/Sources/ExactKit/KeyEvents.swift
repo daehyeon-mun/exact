@@ -137,13 +137,14 @@ extension Presenter {
     func eventParent(of view: KeyPlatformView) -> KeyPlatformView? {
         #if os(macOS)
         if let node = view as? NodeView { return menus.authoredParent(of: node) ?? dialogs.authoredParent(of: node) ?? blocks.parent(of: node) }
+        return view.structuralSuperview
         #else
         if let node = view as? NodeView, navigation.controllers[node.id]?.node === node,
            let parent = navigation.logicalParent(of: node) ?? navigation.container {
             return parent
         }
-        #endif
         return view.superview
+        #endif
     }
     /// Whether `view` is `ancestor` or under it through authored parents
     /// (`eventParent`), a presented route's content under its route's logical

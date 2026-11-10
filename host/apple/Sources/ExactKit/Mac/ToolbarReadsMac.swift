@@ -253,7 +253,7 @@ extension WindowToolbarHost {
         for id in Array(r.nodes) {
             guard let start = presenter.views[id] else { continue }
             for chain in 0..<2 {
-                let up = { (view: NSView) in chain == 1 ? self.presenter.authoredSuperview(of: view) ?? view.superview : view.superview }
+                let up = { (view: NSView) in chain == 1 ? self.presenter.authoredSuperview(of: view) ?? view.superview : view.structuralSuperview }
                 var ancestor = up(start)
                 while let view = ancestor, climbed[chain].insert(ObjectIdentifier(view)).inserted {
                     if let node = view as? NodeView { r.nodes.insert(node.id) }

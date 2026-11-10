@@ -77,7 +77,7 @@ package enum ThemeRoles {
         var at = view
         while let v = at {
             if let owner = owners[ObjectIdentifier(v)], owner.view === v { return owner.table.style }
-            at = v.superview
+            at = v.structuralSuperview
         }
         return (applying ?? last).style
     }
@@ -149,7 +149,7 @@ extension Presenter {
         // change (a live edit, LLP 1121 stage 5).
         func retheme(_ view: PlatformView) {
             (view as? NodeView)?.rethemeSurfaces()
-            view.subviews.forEach(retheme)
+            view.structuralSubviews.forEach(retheme)
         }
         ([root] + ThemeRoles.adopted(by: root)).forEach(retheme)
     }

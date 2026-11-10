@@ -102,8 +102,9 @@ extension Presenter {
         }
         if let id = source, let v = views[id] {
             if shown(v) { return (v, v.bounds) }
-            var at: ShareAnchorView? = v.superview
-            while let a = at, (a as? NodeView)?.props["popover"] == nil { at = a.superview }
+            // On the Mac a closed popover's rows are out of the window (`ParkingMac.swift`): the page as authored is read.
+            var at: ShareAnchorView? = v.structuralSuperview
+            while let a = at, (a as? NodeView)?.props["popover"] == nil { at = a.structuralSuperview }
             if let popover = at as? NodeView,
                let invoker = (carrying("popovertarget") + carrying("commandfor")).first(where: { invocation(of: $0)?.target === popover && shown($0) }) {
                 return (invoker, invoker.bounds)

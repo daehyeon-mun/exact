@@ -23,7 +23,7 @@ extension NodeView {
         var view: NSView? = self
         while let at = view {
             if let node = at as? NodeView, let row = node.style["accent_color"], !row.namesTint, row.channels(dark: false) != nil { return node }
-            view = at.superview
+            view = at.structuralSuperview
         }
         return nil
     }
@@ -53,14 +53,16 @@ extension NodeView {
     /// AppKit has no tint, so the subtree is walked. The node's own rows are
     /// applied by the style change that brought this.
     func accentChanged() {
-        for child in subviews { NodeView.retint(under: child, changed: true) }
+        for child in structuralSubviews { NodeView.retint(under: child, changed: true) }
     }
     /// Mounted or moved in a live window: what is above it may be another
     /// accent, for it and for what it holds.
     func retintSubtree() { NodeView.retint(under: self, changed: false) }
+    /// A changed accent reaches what a hidden node holds out of the window too: back in it, those views would find
+    /// the node they last resolved by above them and keep its old colour. A move reaches them when they return.
     private static func retint(under view: NSView, changed: Bool) {
         (view as? NodeView)?.retint(changed: changed)
-        for child in view.subviews { retint(under: child, changed: changed) }
+        for child in changed ? view.structuralSubviews : view.subviews { retint(under: child, changed: changed) }
     }
     /// What names the tint here, applied again by the accent now above it:
     /// its rows, its inline runs, its symbol and an `svg`'s paints. Nothing

@@ -90,7 +90,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     var columnRecord: ColumnRecord?  // LLP 1093 D7: fragments or columns
     var cachedTextLayout: (width: CGFloat, paragraph: Paragraph)?
     var liveText: String?
-    package var props: [String: String] = [:] { didSet { ownARIAAttributes = nil; presenter?.propsChanged(self); presenter?.mouseChain.bubbledPress?.validate() } }
+    package var props: [String: String] = [:] { didSet { ownARIAAttributes = nil; if props["accessibilityDisabled"] != nil { Self.ariaDisabledSaid = true }; presenter?.propsChanged(self); presenter?.mouseChain.bubbledPress?.validate() } }
     private var ownARIAAttributes: [NSAccessibility.Attribute]?
     var nativeActiveRefusals: [String: String] = [:]
     package var style: NodeStyle = [:]
@@ -99,6 +99,8 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     /// CSS removes it with its subtree, or its texts paint at its 0×0 frame's
     /// origin (recipes F19). Reading says whether it is hidden, for either reason.
     private var hostHidden = false
+    /// Its children while it is hidden, out of the window, and the batch it last joined a window in (`ParkingMac.swift`).
+    var parked: ParkedContent?, joinedBatch = -1
     /// Whether the host hid this view, whatever CSS's `display` says: what a
     /// projection or a placement saves and restores, since `isHidden` also
     /// reads `display: none` (review B1: restoring that wrote CSS's bit into
@@ -112,7 +114,9 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
             // projection that means it hides again on its next pass.
             let css = style["display"]?.string == "none"
             if !(newValue && css && !hostHidden && super.isHidden) { hostHidden = newValue }
+            let was = super.isHidden
             super.isHidden = hostHidden || css
+            if super.isHidden != was { hiddenChanged(!was) }
             if shadowStand != nil { followShadowStand() }
         }
     }
@@ -435,16 +439,26 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         }
         return own.isEmpty ? nil : own
     }
+    /// AppKit's own names for a node's view, then "AXLanguage", with and without "AXEnabled" before it: the list of a
+    /// node with no ARIA attribute of its own, built from the first node asked. AppKit asks for the list in every
+    /// accessibility write (`NSAccessibilitySetObjectValueForAttribute`), and reading its array in Swift bridges
+    /// each name: 1.6 µs a write against 0.4 with the list kept (measured on plain views), on every node a batch
+    /// creates or a gate reaches. AppKit's list for a plain view is the same 11 names whatever accessibility
+    /// properties are set (the same measurement), so it is not asked again.
+    nonisolated(unsafe) private static var plainNames: (available: [NSAccessibility.Attribute], unavailable: [NSAccessibility.Attribute])?
     package override func accessibilityAttributeNames() -> [NSAccessibility.Attribute] {
         if ownARIAAttributes == nil {
             ownARIAAttributes = Self.ariaAttributes.filter { $0 != "AXEnabled" && ariaAttribute($0) != nil }.map { .init(rawValue: $0) }
         }
-        var attributes = super.accessibilityAttributeNames()
-        // Form sync already advertises AXEnabled. Only an uninitialized view
-        // needs ancestry to decide its presence; the value always reads ancestry.
-        if !attributes.contains(.enabled), ariaUnavailable { attributes.append(.enabled) }
-        attributes.append(.init(rawValue: "AXLanguage"))
-        return attributes + (ownARIAAttributes ?? [])
+        if Self.plainNames == nil {
+            let own = super.accessibilityAttributeNames(), language = NSAccessibility.Attribute(rawValue: "AXLanguage")
+            // Form sync already advertises AXEnabled. Only an uninitialized view
+            // needs ancestry to decide its presence; the value always reads ancestry.
+            Self.plainNames = (own + [language], own.contains(.enabled) ? own + [language] : own + [.enabled, language])
+        }
+        let kept = Self.plainNames!
+        let names = ariaUnavailable ? kept.unavailable : kept.available
+        return ownARIAAttributes?.isEmpty == false ? names + (ownARIAAttributes ?? []) : names
     }
     package override func accessibilityAttributeValue(_ attribute: NSAccessibility.Attribute) -> Any? {
         if attribute == .parent, let parent = dialogWebArea ?? modalAccessibilityParent { return parent }
@@ -550,7 +564,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
 
     /// Where children go: the scroll document view, or this view; a glass
     /// group innermost (`GlassGroup.swift`).
-    var container: NSView { glassGroupContent ?? baseContainer }
+    var container: NSView { parked ?? glassGroupContent ?? baseContainer }
     package var grid: GridPlace? // where layout put this box and where it is drawn (`PixelGridMac.swift`)
 
     // @ref LLP 1001 §1 — two semantic materials, not sampled blur constants.
@@ -660,7 +674,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     /// above whose overlay holds it.
     package var canvasAbove: NodeView? {
         var v: NSView = self
-        while let s = v.superview {
+        while let s = v.structuralSuperview {
             if let c = s as? NodeView, c.overlay === v { return c }
             v = s
         }
@@ -917,7 +931,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         var ancestor: NSView? = self
         while let current = ancestor {
             if let node = current as? NodeView, node.style["display"]?.string == "none" { return false }
-            ancestor = current.superview
+            ancestor = current.structuralSuperview
         }
         return true
     }
@@ -1130,7 +1144,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
             observeLiveScroll(sv, replacing: scroll)
             sv.autoresizingMask = [.width, .height]
             GlassGroups.moving(in: self) {
-                let children = container.subviews.filter { $0 is NodeView }
+                let children = liveContainer.subviews.filter { $0 is NodeView }
                 addSubview(sv)
                 for child in children { sv.documentView?.addSubview(child) }
             }
@@ -1239,7 +1253,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         if superview == nil { boxFilter?.remove() } else if boxFilter != nil { renderFilter() }
         paintOrderMoved()
         syncDisabledLook() // a list's row is known by where it is mounted (PressLookMac.swift)
-        if window != nil { retintSubtree() } // and its tint by what is above it (NodeColorMac.swift)
+        if window != nil { retintSubtree(); parkUnderHiddenAncestor() } // and its tint by what is above it (NodeColorMac.swift)
     }
 
     /// `overflow: hidden` clips to the rounded corners: one radius rides the
@@ -1295,7 +1309,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         // A plain container's detachment moves no NodeView's superview.
         pressMoves &+= 1
         if window == nil { holdPresenter?.mouseChain.bubbledPress?.cancel(in: self) }
-        if window != nil { retint() }
+        if window != nil { retint(); joinedBatch = presenter?.session?.appliedBatches ?? 0; followParkedAppearance() }
         if window != nil, !backdropOperations.isEmpty { applyBackdrop() }
         presenter?.transformGeometry.changed()
         presenter?.videoVisibility?.changed()

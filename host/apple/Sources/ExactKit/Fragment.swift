@@ -45,7 +45,7 @@ extension Presenter {
         }
         let id = fragment.removingPercentEncoding
         let target = [fragment, id ?? ""].lazy.filter { !$0.isEmpty }
-            .compactMap { name in nodes.first { $0.props["id"] == name && $0.isDescendant(of: route) } }.first
+            .compactMap { name in nodes.first { $0.props["id"] == name && $0.isWithin(route) } }.first
         if let target, let name = target.props["id"] {
             scrollElementIntoView([name, "start", "nearest", "instant"], target: target)
             #if !os(macOS)
@@ -61,7 +61,7 @@ extension Presenter {
         if !fragment.isEmpty, id?.lowercased() != "top" {
             session?.log("fragment #\(fragment): no element in the route of visit \(visit) has that id; the route goes to its top")
         }
-        for node in nodes where node === route || node.isDescendant(of: route) {
+        for node in nodes where node.isWithin(route) {
             #if os(macOS)
             guard let clip = node.scroll?.contentView, clip.bounds.origin.y != 0 else { continue }
             clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: 0))

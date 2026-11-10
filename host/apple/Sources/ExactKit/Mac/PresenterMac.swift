@@ -128,6 +128,7 @@ package final class Presenter {
     lazy var tables = TableHost(self)
     lazy var alerts = AlertHost(self)
     lazy var navigation = NavigationHost(presenter: self)
+    lazy var parking = Parking(self)
     lazy var backSwipe = BackSwipe(self)
     /// SVG scenes and CSS animations (LLP 1055 D4, D7).
     let svg = SvgHost()
@@ -287,7 +288,7 @@ package final class Presenter {
             readersDeferred = readersDeferred || node.readerParagraph?.waitingForPixels == true
         }
         let replacementsDeferred = !inScrollCallback && textRasters.replaceVisible(candidates, wait: sliceBudget)
-        var rastersDeferred = false
+        var rastersDeferred = false, first: [NodeView] = []
         for node in candidates where node.needsTextRaster && node.rastersText {
             // On screen without pixels: now. Otherwise nearest first, a few a slice.
             if textIsVisible(node) {
@@ -296,9 +297,10 @@ package final class Presenter {
                     // its scroll synchronizer but before the display commit.
                     node.needsDisplay = true
                     rastersDeferred = true
-                } else { textRasters.ensure(node, urgent: true) }
+                } else { first.append(node) }
             } else { rasters.append(node) }
         }
+        textRasters.ensureVisible(first)
         var rasterBudget = limit.map { $0 == 0 ? 0 : Self.textRastersPerSlice } ?? rasters.count
         for node in rasters {
             guard rasterBudget > 0 else { rastersDeferred = true; break }
@@ -656,7 +658,7 @@ package final class Presenter {
         menus.reset()
         dialogs.reset()
         toolbar.reset() // its header's cover goes with `covers.reset()` below, untold
-        navigation.reset()
+        navigation.reset(); parking.reset()
         sidebar.reset()
         statusItems.reset()
         covers.reset()
@@ -1114,7 +1116,7 @@ package final class Presenter {
             if relaid { followPointer() }
         }
         if !batch.ops.isEmpty { textViewportIndex = nil }
-        var reparented = Set<UInt32>()
+        var reparented = Set<UInt32>(), pregated = false
         let structureChanged = batch.ops.contains { [.children, .roots, .destroy, .create, .style].contains($0.op) }
         if structureChanged { selection.structureChanged() }
         // A button's face changes only in a batch that says so or one that touches it (`ControlHost.face`).
@@ -1123,6 +1125,7 @@ package final class Presenter {
         for op in batch.ops {
             let kind = op.op
             let id = op.id
+            if let node = op.nodeID { controls.touch(node, restyles: kind == .style || kind == .props || kind == .create) }
             switch kind {
             // `fieldContent` carries resolved padding the face holds (a percentage of a box that resized).
             case .create, .props, .style, .children, .paragraph, .flow, .frame, .fieldContent: controls.faceChanged(id)
@@ -1184,6 +1187,7 @@ package final class Presenter {
                 // (LLP 1062 D4).
                 if v.style["text_color"] != color { session?.noteAppearance(v) }
             case .children:
+                if !pregated { pregated = true; navigation.pregate(batch) }
                 guard let parent = views[id] else { continue }
                 let want = op.ids.compactMap { views[UInt32($0)] }
                 let container = parent.container
@@ -1306,7 +1310,7 @@ package final class Presenter {
         pendingScrolls.removeAll()
         // A batch of presentation values only changes no shortcut, status item, segment or dialog.
         let presentationOnly = !batch.controls && batch.ops.allSatisfy { Self.presentationKinds.contains($0.op) }
-        controls.sync()
+        controls.sync(moved: reparented)
         menus.sync()
         glassGroups.reconcile()
         positionContexts()
@@ -1340,10 +1344,13 @@ package final class Presenter {
             shortcuts.sync(); statusItems.sync()
         }
         syncAccessibility(changed: changed, disabledRoots: disabledRoots)
+        if batch.ops.contains(where: { [.children, .roots, .destroy, .create].contains($0.op) }) { parking.changed = true }
+        parking.settle()
         oweTextRefresh()
-
         _ = chrome.takeChangedNames()
     }
+    /// A hidden node's children left the window or came back (`ParkingMac.swift`): what is read from the views shown is read again.
+    func parkingChanged() { selection.structureChanged(); textViewportIndex = nil; keyViewLoopStale = true; HitExtent.changed(); oweTextRefresh() }
 
     /// The text refresh pass under way (0: none) and the last one given.
     nonisolated(unsafe) static var rasterRefreshEpoch: UInt = 0, rasterEpochCounter: UInt = 0
@@ -1408,7 +1415,7 @@ package final class Presenter {
             var view: NSView? = views[id]
             while let current = view {
                 if let node = current as? NodeView, !seen.insert(node.id).inserted { break }
-                view = current.superview
+                view = current.structuralSuperview
             }
         }
         return seen

@@ -240,7 +240,7 @@ final class AlertHost {
             guard let source = owner.source, presenter.menus.invokes(source, pop, requiringTarget: owner.invoked) else { return false }
         }
         return owner.rows.allSatisfy { row in
-            guard let node = row.node, presenter.menus.live(node), node.isDescendant(of: pop), closes(node, pop, popover: owner.popover),
+            guard let node = row.node, presenter.menus.live(node), node.isWithin(pop), closes(node, pop, popover: owner.popover),
                   presenter.menus.title(of: node) == row.title else { return false }
             return (row.cancel ? !node.disabled : choosable(node, in: pop)) == row.enabled
         }

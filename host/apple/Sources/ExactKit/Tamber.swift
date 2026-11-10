@@ -359,7 +359,7 @@ final class Tambers {
     /// traits move too, which resolves their dynamic colours again.
     static func redraw(_ view: ExactTamberView) {
         #if os(macOS)
-        func walk(_ v: NSView) { v.needsDisplay = true; v.needsLayout = true; v.subviews.forEach(walk) }
+        func walk(_ v: NSView) { v.needsDisplay = true; v.needsLayout = true; v.structuralSubviews.forEach(walk) }
         walk(view)
         #else
         view.traitOverrides[TamberMoves.self] = view.traitCollection[TamberMoves.self] &+ 1

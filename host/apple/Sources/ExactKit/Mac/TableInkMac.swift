@@ -43,12 +43,12 @@ extension NodeView {
     /// read up the view chain, as the tint is (NodeColorMac.swift).
     var inEmphasizedRow: Bool {
         guard let presenter else { return false }
-        if let row = presenter.navigation.split.emphasizedRow, isDescendant(of: row) { return true }
+        if let row = presenter.navigation.split.emphasizedRow, isWithin(row) { return true }
         guard !presenter.tables.feeds.isEmpty else { return false }
-        var above = superview
+        var above = structuralSuperview
         while let view = above, !(view is NSTableView) {
             if let cell = view as? TableRowCell { return cell.paintsSelection && cell.backgroundStyle == .emphasized }
-            above = view.superview
+            above = view.structuralSuperview
         }
         return false
     }
@@ -135,7 +135,7 @@ extension NodeView {
                 if let leaf = node.symbolView { leaf.cell?.backgroundStyle = node.symbolBackground(emphasized) }
                 node.tintIconShape(emphasized)
             }
-            view.subviews.forEach(walk)
+            view.structuralSubviews.forEach(walk)
         }
         walk(self)
     }

@@ -167,6 +167,9 @@ package final class Runtime {
     package private(set) var heldCalls: [String] = []
     /// The batch-answering calls `on` let through on main: a test's spy on what reached the runtime.
     package private(set) var entered = 0
+    /// The kernel's layout stamp before and after the last `blocks` call that ran, read in the owner's same turn
+    /// (ExactKit's `HostBlock.swift`): nothing else moved the stamp between them.
+    package var blocksStamps: (before: UInt64, after: UInt64) = (0, 0)
     package static let heldBatch = { var batch = Batch(ops: [], timers: false, motion: false, clock: nil, error: nil); batch.held = true; return batch }()
     package func takeHeldCalls() -> [String] { defer { heldCalls = [] }; return heldCalls }
     /// Whether held; if so, `caller` is named in `heldCalls` (a call held outside `on`: `selection`, a notice's `later`).

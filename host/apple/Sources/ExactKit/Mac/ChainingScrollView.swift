@@ -352,6 +352,11 @@ package final class ChainingScrollView: NSScrollView {
 extension NodeView {
     /// Kernel frames include the gutter; the document starts at the clip.
     func frameInScrollDocument(_ frame: NSRect) -> NSRect {
+        // Parked under a hidden scroller (`ParkingMac.swift`), it is framed as in the document it returns to.
+        if let owner = (superview as? ParkedContent)?.owner, let scroll = owner.scroll, owner.liveContainer === scroll.documentView {
+            let origin = scroll.kernelDocumentOrigin
+            return frame.offsetBy(dx: -origin.x, dy: -origin.y)
+        }
         guard let clip = superview?.superview as? NSClipView,
               let scroll = clip.superview as? ChainingScrollView,
               scroll.documentView === superview else { return frame }

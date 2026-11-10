@@ -5,6 +5,11 @@ use super::*;
 mod advance_tests;
 #[path = "closed.rs"]
 pub(super) mod closed;
+#[path = "extents.rs"]
+pub(super) mod extents;
+#[cfg(test)]
+#[path = "placed_tests.rs"]
+mod placed_tests;
 #[path = "separator.rs"]
 pub(super) mod separator;
 
@@ -262,12 +267,55 @@ impl<D: DataSource> Host<D> {
     }
 
     /// LLP 1083.000 D4: publish ranks independently of geometry, including zero.
+    /// A node no commit changed or changed under since it was placed stands
+    /// by what it let escape then (`Kernel::paint_order_reusing`): the pass
+    /// reads the changed nodes and the boxes above them, not every node.
     pub(super) fn emit_ranks(&mut self, batch: &mut Batch) {
-        for (id, placed) in self.runner.kernel().paint_order() {
+        let (ranks, escapes, stale) = (&self.ranks, &self.rank_escapes, &self.rank_stale);
+        let mut known = |view: ViewId| {
+            (!stale.contains(&view) && ranks.contains_key(&view))
+                .then(|| escapes.get(&view).copied().unwrap_or_default())
+        };
+        let placed = self.runner.kernel().paint_order_reusing(&mut known);
+        #[cfg(test)]
+        {
+            self.rank_placed += placed.len();
+        }
+        for (id, placed, escapes) in placed {
             if self.ranks.insert(id, placed.rank) != Some(placed.rank) {
                 batch.rank(id, placed.rank);
             }
+            if escapes == Default::default() {
+                self.rank_escapes.remove(&id);
+            } else {
+                self.rank_escapes.insert(id, escapes);
+            }
+            self.rank_stale.remove(&id);
         }
+    }
+
+    /// A commit created `id` or changed its style, props or children: its
+    /// place among its siblings and its share of the document are found
+    /// again, with those of each box above it. A node the next pass does not
+    /// reach (one out of the tree) stays marked until one does.
+    pub(super) fn changed_placed(&mut self, id: ViewId) {
+        let kernel = self.runner.kernel();
+        self.extents.changed(kernel, id);
+        let mut at = Some(id);
+        while let Some(view) = at {
+            if !self.rank_stale.insert(view) {
+                break;
+            }
+            at = kernel.node(view).and_then(|n| n.parent);
+        }
+    }
+
+    /// `id` was destroyed.
+    pub(super) fn forget_placed(&mut self, id: ViewId) {
+        self.ranks.remove(&id);
+        self.rank_escapes.remove(&id);
+        self.rank_stale.remove(&id);
+        self.extents.forget(id);
     }
 
     /// The parent-relative frames and scroll content sizes that changed since
@@ -288,6 +336,7 @@ impl<D: DataSource> Host<D> {
                 continue;
             };
             let id = node.id;
+            self.extents.changed(self.runner.kernel(), id);
             if self.retained_hold(id) {
                 continue;
             }
@@ -552,16 +601,16 @@ impl<D: DataSource> Host<D> {
 }
 
 impl<D: DataSource> Host<D> {
-    /// Each root that does not clip publishes its `document_extent` as its
-    /// content, which the presenter's document scrolls: measured whenever
-    /// anything was laid out anew, since a box deep below a root may have
-    /// moved without the root.
+    /// Each root that does not clip publishes its document extent
+    /// (`extents`) as its content, which the presenter's document scrolls:
+    /// measured whenever anything was laid out anew, since a box deep below
+    /// a root may have moved without the root.
     fn emit_extents(&mut self, laid_out: bool, batch: &mut Batch) {
         if !laid_out && !self.layout_withheld {
             return;
         }
         let kernel = self.runner.kernel();
-        let extents: Vec<_> = kernel
+        let roots: Vec<_> = kernel
             .roots()
             .into_iter()
             .filter(|id| !self.native_protected_id(*id))
@@ -571,7 +620,10 @@ impl<D: DataSource> Host<D> {
                     && n.props.str(PropId::Popover).is_none()
                     && style::effective_overflow(n) == (Overflow::Visible, Overflow::Visible)
             })
-            .map(|n| (n.id, document_extent(&n, kernel)))
+            .collect();
+        let extents: Vec<_> = roots
+            .iter()
+            .map(|n| (n.id, self.extents.document(n, kernel)))
             .collect();
         for (id, c) in extents {
             let m = self.mirror.entry(id).or_default();
@@ -730,40 +782,6 @@ pub(super) fn content_size(node: &NodeRef<'_>, kernel: &Kernel) -> (f32, f32) {
             };
             w = w.max(c.frame.x - node.frame.x + c.frame.width + right);
             h = h.max(c.frame.y - node.frame.y + c.frame.height + bottom);
-        }
-    }
-    (w, h)
-}
-
-/// What a root that does not clip adds to the document: its border box and
-/// every laid-out box below it, down to a box that clips or scrolls (whose
-/// own box counts, not what it holds), as a browser's viewport scrolls the
-/// root element's overflow (CSS Overflow 3 §2.2). The root's end padding is
-/// not added: the viewport is the scroll container, not the root. A box in
-/// another containing block, the top layer, an `svg`'s inside and the head
-/// are elsewhere. Boxes are where layout put them: a transform below the root
-/// is not projected (the presenter projects the root's own).
-pub(super) fn document_extent(root: &NodeRef<'_>, kernel: &Kernel) -> (f32, f32) {
-    let (x0, y0) = (root.frame.x, root.frame.y);
-    let (mut w, mut h) = (root.frame.width, root.frame.height);
-    let mut below = root.children();
-    while let Some(id) = below.pop() {
-        let Some(c) = kernel.node(id) else { continue };
-        let elsewhere = kernel.host_block(id).is_some()
-            || c.node_type.is_svg_element()
-            || c.node_type.is_metadata()
-            || c.props.str(PropId::SemanticTag) == Some("dialog")
-            || c.props.str(PropId::Popover).is_some();
-        if elsewhere {
-            continue;
-        }
-        // An empty box adds nothing, as Chromium's rectangle union skips one; what it holds may.
-        if c.frame.width > 0.0 && c.frame.height > 0.0 {
-            w = w.max(c.frame.x - x0 + c.frame.width);
-            h = h.max(c.frame.y - y0 + c.frame.height);
-        }
-        if style::effective_overflow(&c) == (Overflow::Visible, Overflow::Visible) {
-            below.extend(c.children());
         }
     }
     (w, h)

@@ -84,8 +84,8 @@ extension NodeView {
         defer { PaintOrder.end() }
         paintGhost = value
         if value {
-            var parent = superview
-            while let view = parent, !(view is NodeView) { parent = view.superview }
+            var parent = structuralSuperview
+            while let view = parent, !(view is NodeView) { parent = view.structuralSuperview }
             ghostParent = parent as? NodeView
             ghostParent?.paintGhosts += 1
         } else {

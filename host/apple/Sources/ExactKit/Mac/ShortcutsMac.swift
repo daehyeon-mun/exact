@@ -738,10 +738,10 @@ final class ShortcutHost: NSObject, NSMenuItemValidation {
     private func isNavigation(_ view: NodeView, shortcut: Shortcut) -> Bool {
         if shortcut.modifiers == .command, shortcut.key == "[" || shortcut.key == "]" { return true }
         guard view.props["accessibilityRole"] == "tab" else { return false }
-        var ancestor = view.superview
+        var ancestor = view.structuralSuperview
         while let parent = ancestor {
             if let node = parent as? NodeView, node.props["accessibilityRole"] == "tablist" { return true }
-            ancestor = parent.superview
+            ancestor = parent.structuralSuperview
         }
         return false
     }

@@ -28,11 +28,13 @@ extension Presenter {
                                              overflow: overflow, rtl: rtl, history: &history, in: bounds)
             return PositionArea.Placement(origin: origin, size: laid, region: bounds)
         }
+        // Asked of the owner once for the placement, not once for each region it weighs.
+        var stamp: UInt64?
         let at = PositionArea.place(placed.area, anchor: anchor, margins: margins, fallbacks: placed.fallbacks,
                                     overflow: overflow, rtl: rtl, scroll: scroll, pageScroll: pageScroll, history: &history, in: bounds) { region in
             guard let session = self.session else { return PositionArea.Measured(size: laid, margins: margins) }
-            let stamp = session.runtime.layoutStamp()
-            return self.regionMeasures.measured(id, region, batch: session.appliedBatches, stamp: stamp) {
+            if stamp == nil { stamp = session.runtime.layoutStamp() }
+            return self.regionMeasures.measured(id, region, batch: session.appliedBatches, stamp: stamp ?? 0) {
                 session.runtime.measureBlock(id, in: .region(region))
             } ?? PositionArea.Measured(size: laid, margins: margins)
         }
@@ -93,7 +95,16 @@ extension Presenter {
         let tell = { [weak self] in
             guard let self, let pending = self.regionsUntold.removeValue(forKey: id) else { return }
             guard let session = self.session, let now = self.views[id], ObjectIdentifier(now) == pending.view else { return }
+            #if os(macOS)
+            // Telling a box its block changes what no box measures in a block it is offered (`Kernel::measure_block`
+            // lays a subtree out in the block it is given), so the measures kept stand across the telling and the
+            // batch it returns: the placement that batch runs asks the owner for none of them again.
+            let batch = session.runtime.blocks([(id, pending.block)]), stamps = session.runtime.blocksStamps
+            if !batch.held { self.regionMeasures.carry(from: stamps.before, to: stamps.after, batch: session.appliedBatches) }
+            session.applyUnlessEmpty(batch)
+            #else
             session.applyUnlessEmpty(session.runtime.blocks([(id, pending.block)]))
+            #endif
         }
         #if os(macOS)
         let inBatch = isApplying
@@ -124,6 +135,13 @@ extension PositionArea {
             let answer = measure()
             if let answer { kept[key] = answer }
             return answer
+        }
+
+        /// The measures kept at layout stamp `before` and batch `batch` stand at stamp `after` and the next batch:
+        /// what moved the stamp changed none of them (`Presenter.tellRegion`).
+        mutating func carry(from before: UInt64, to after: UInt64, batch: Int) {
+            guard stamp == before, self.batch == batch, !kept.isEmpty else { return }
+            (self.batch, stamp) = (batch + 1, after)
         }
     }
 }

@@ -61,8 +61,9 @@ final class BarReadsMacTests: XCTestCase {
     private func narrowed(_ p: Presenter, _ batch: Batch) -> Bool {
         let made = Set(batch.ops.filter { $0.op == .create }.map(\.id))
         func inRow(_ id: UInt32) -> Bool {
-            var ancestor = p.views[id]?.superview
-            while let view = ancestor { if (view as? NodeView)?.kind == "list" { return true }; ancestor = view.superview }
+            // The page as authored: what a hidden node holds waits out of the window (`ParkingMac.swift`).
+            var ancestor = p.views[id]?.structuralSuperview
+            while let view = ancestor { if (view as? NodeView)?.kind == "list" { return true }; ancestor = view.structuralSuperview }
             return false
         }
         return batch.ops.contains { p.toolbar.mayChangeAHeader(wireBatchOf($0)) && !made.contains($0.id) && !inRow($0.id) }

@@ -35,6 +35,13 @@ extension NodeView {
 }
 #endif
 
+#if os(macOS)
+extension NodeView {
+    /// Whether any node of the process has carried `aria-disabled` (`ariaUnavailable`).
+    nonisolated(unsafe) static var ariaDisabledSaid = false
+}
+#endif
+
 extension NodeView {
     /// A button: a custom one (`kind == "button"`) or a native one, under any
     /// role (LLP 1069.011.000 D1).
@@ -98,6 +105,10 @@ extension NodeView {
     /// ARIA disabled applies to focusable descendants, without changing input.
     package var ariaUnavailable: Bool {
         #if os(macOS)
+        // No node has said `aria-disabled`: nothing is. AppKit asks a node's attribute names in every accessibility
+        // write, and the names read this, so the walk below ran several times for each node a batch made. The flag
+        // is the process's: a session's view can stand under another's node (the sample host).
+        guard NodeView.ariaDisabledSaid else { return false }
         var ancestor: NSView? = self
         let menus = presenter?.menus
         #else
@@ -611,6 +622,9 @@ extension NodeView {
         accessibilityHiddenWritten = hidden
         super.setAccessibilityHidden(hidden)
     }
+    /// Under a hidden view it is hidden with it: the flag is written on the hidden view alone
+    /// (`NavigationHost.refreshInputGatesOnce`), and this answers for what that view holds.
+    package override func isAccessibilityHidden() -> Bool { accessibilityHiddenWritten || isHiddenOrHasHiddenAncestor }
 }
 
 extension NSView {

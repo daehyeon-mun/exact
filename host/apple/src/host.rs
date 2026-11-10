@@ -214,6 +214,17 @@ pub struct Host<D: DataSource> {
     /// Each multi-column record as the presenter last heard it (LLP 1093 D7).
     fragments: IdMap<ViewId, String>,
     ranks: IdMap<ViewId, i64>,
+    /// What each placed node lets escape into its parent's painting, where
+    /// that is anything, and the nodes a commit changed or changed under
+    /// since they were placed (`Host::emit_ranks`).
+    rank_escapes: IdMap<ViewId, exact_kernel::paint_order::Potentials>,
+    rank_stale: IdSet<ViewId>,
+    /// Nodes placed since the host was made.
+    #[cfg(test)]
+    rank_placed: usize,
+    /// What each box adds to its root's document, as last found
+    /// (`layout::extents`).
+    extents: layout::extents::Extents,
     roots: Vec<ViewId>,
     /// Last published common collection snapshot; refreshed only after layout.
     collections_json: String,
@@ -554,6 +565,11 @@ impl<D: DataSource> Host<D> {
             stickies: IdMap::default(),
             fragments: IdMap::default(),
             ranks: IdMap::default(),
+            rank_escapes: IdMap::default(),
+            rank_stale: IdSet::default(),
+            #[cfg(test)]
+            rank_placed: 0,
+            extents: Default::default(),
             roots: Vec::new(),
             collections_json: "[]".into(),
             collection_heads: Some(Vec::new()),

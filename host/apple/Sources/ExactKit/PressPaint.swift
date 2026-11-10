@@ -211,7 +211,7 @@ extension NodeView {
     /// one it inherits). A view with a colour of its own keeps its subtree's
     /// too.
     private func inkBelow(_ view: PlatformView, ink: BatchValue, inherited: BatchValue?) {
-        for child in view.subviews {
+        for child in view.structuralSubviews {
             guard let node = child as? NodeView else { inkBelow(child, ink: ink, inherited: inherited); continue }
             // (One an ancestor's press colours now takes this one's, if what it shows beneath is the same; not one
             // showing its own colour, a press's included, which is its subtree's boundary.)
@@ -264,14 +264,14 @@ extension NodeView {
     /// The nearest press above that would colour this view now: one down (or
     /// its release waiting) with a press colour, no colour written between.
     private func liveLender() -> NodeView? {
-        var view = superview
+        var view = structuralSuperview
         while let current = view {
             if let node = current as? NodeView {
                 // (A press colour shows over the node's own written one; the written one stops what is above.)
                 if node.pressPaint.down || node.pressPaint.releaseHeld, Self.pressOverlay(node.style)["text_color"] != nil { return node }
                 if node.wrote("text_color") { return nil }
             }
-            view = current.superview
+            view = current.structuralSuperview
         }
         return nil
     }
@@ -318,7 +318,7 @@ extension NodeView {
 
     /// The views below `view` coloured by `pressing`'s press, back to their own.
     private func endInk(below view: PlatformView, by pressing: NodeView) {
-        for child in view.subviews {
+        for child in view.structuralSubviews {
             if let node = child as? NodeView { node.endLent(by: pressing) }
             endInk(below: child, by: pressing)
         }

@@ -27,12 +27,13 @@ enum ButtonConfigurationMac {
         guard radii.count == 4, let radius = radii.first, radii.allSatisfy({ $0 == radius }), size.width > 0, size.height > 0 else { return false }
         return radius >= Double(min(size.width, size.height) / 2)
     }
-    static func corners(_ face: ButtonFace, to button: NSButton, size: NSSize) {
+    /// `size` is read only for an authored radius: `fittingSize` builds an Auto Layout engine in the button.
+    static func corners(_ face: ButtonFace, to button: NSButton, size: @autoclosure () -> NSSize) {
         guard #available(macOS 26.0, *), LinkedDesign.liquidGlass else { return }
         let radiusAuthored = face.rows.button.keys.contains { $0.hasPrefix("border_radius_") }
         // A radius wins over the named style, including an unsupported radius.
         button.borderShape = radiusAuthored
-            ? (capsuleRadius(face, size: size) ? .capsule : .automatic)
+            ? (capsuleRadius(face, size: size()) ? .capsule : .automatic)
             : (face.rows.button["control_corner_style"]?.string == "capsule" ? .capsule : .automatic)
     }
     @discardableResult
