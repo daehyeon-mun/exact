@@ -94,6 +94,7 @@ fn a_lowered_play_is_held_at_its_start_until_the_frame_starts_it() {
 #[test]
 fn a_transition_shows_its_start_at_the_first_frame_then_one_interval() {
     let mut host = boot();
+    host.svg.play_transitions = false;
     let go = id(&host, "go");
     host.dispatch_at(go, Event::Press, 100.0);
     host.advance(110.0);
@@ -940,10 +941,15 @@ fn box_transform_transitions_play_without_sampling_and_reclaim_for_the_agent() {
         );
         assert_eq!(spec(&batch, id(&host, name))["k"], path);
     }
-    assert_eq!(
-        spec(&batch, id(&host, "move"))["v"],
-        serde_json::json!([0, 50])
-    );
+    let translated = spec(&batch, id(&host, "move"));
+    if cfg!(target_os = "macos") {
+        assert_eq!(translated["v"], serde_json::json!([-50, 0]));
+        assert_eq!(translated["a"], 1);
+        assert_eq!(translated["to"][2], 50);
+    } else {
+        assert_eq!(translated["v"], serde_json::json!([0, 50]));
+        assert!(translated["a"].is_null());
+    }
     let radians = spec(&batch, id(&host, "turn"))["v"][1].as_f64().unwrap();
     assert!((radians - std::f64::consts::PI).abs() < 1e-5);
     for (name, property) in [

@@ -12,6 +12,7 @@
 //! Calls stay on their runtime's creating thread: ExactKit's owner thread on Apple (LLP 1072 T1).
 //! Re-entrant calls return `busy` instead of trapping. [`host!`] exports one app's source and baked plan;
 //! each process links one app archive because the C names are fixed.
+mod batch;
 mod control_text;
 mod navigation;
 mod share;
@@ -968,13 +969,27 @@ impl<D: DataSource> Bridge<D> {
     /// 41 a text field's `input` and `change` with its selection, 42 its
     /// `select` (`start,end,direction,text`; x2apps codeedit #2).
     pub fn dispatch(&mut self, view: u32, kind: u32, len: usize, now_ms: f64) -> u32 {
+        let event = match self.event_of(kind, len) {
+            Ok(event) => event,
+            Err(out) => return out,
+        };
+        let out = match self.host.as_mut() {
+            Some(h) => h.dispatch_at(view, event, now_ms),
+            None => not_booted(),
+        };
+        self.emit(out)
+    }
+
+    /// The event of a host kind with the input buffer's first `len` bytes as
+    /// its payload, or the refusal already emitted.
+    fn event_of(&mut self, kind: u32, len: usize) -> Result<Event, u32> {
         let payload =
             String::from_utf8_lossy(&self.input[..len.min(self.input.len())]).into_owned();
         let event = match kind {
             // A press, with the modifiers held as a chord prefix (gallery F20).
             0 => {
                 let Some(event) = Event::press(&payload) else {
-                    return self.refuse("invalid press modifiers");
+                    return Err(self.refuse("invalid press modifiers"));
                 };
                 event
             }
@@ -983,7 +998,7 @@ impl<D: DataSource> Bridge<D> {
             // @ref LLP 1069.002 D3, D2 — 26 is a file input's `change`, one picked file per line; 27 its `cancel`.
             26 => {
                 let Some(files) = exact_runner::Picked::payload(&payload) else {
-                    return self.refuse("invalid picked files");
+                    return Err(self.refuse("invalid picked files"));
                 };
                 Event::Change(exact_runner::ControlValue::Files(files))
             }
@@ -992,7 +1007,7 @@ impl<D: DataSource> Bridge<D> {
             23 => Event::Input(payload.into()),
             24 | 25 => {
                 let Some(on) = Event::checked_payload(&payload) else {
-                    return self.refuse("invalid checked state");
+                    return Err(self.refuse("invalid checked state"));
                 };
                 if kind == 24 {
                     Event::Change(on)
@@ -1024,7 +1039,7 @@ impl<D: DataSource> Bridge<D> {
             6 | 10 | 13 | 19 | 20 | 21 | 28..=38 | 40..=44 | 46..=48 | 50..=60 => {
                 match Event::of_host_kind(kind, &payload) {
                     Ok(event) => event,
-                    Err(error) => return self.refuse(error),
+                    Err(error) => return Err(self.refuse(error)),
                 }
             }
             // @ref LLP 1038 D8 — the next ABI kind after scroll.
@@ -1034,7 +1049,7 @@ impl<D: DataSource> Bridge<D> {
                     let out = self.host.as_ref().map_or_else(not_booted, |h| {
                         h.hold_refusal("invalid height release coordinates")
                     });
-                    return self.emit(out);
+                    return Err(self.emit(out));
                 };
                 event
             }
@@ -1049,7 +1064,7 @@ impl<D: DataSource> Bridge<D> {
                         .host
                         .as_ref()
                         .map_or_else(not_booted, |h| h.hold_refusal("invalid transform event"));
-                    return self.emit(out);
+                    return Err(self.emit(out));
                 };
                 event
             }
@@ -1057,17 +1072,13 @@ impl<D: DataSource> Bridge<D> {
             18 => {
                 let Some(event) = self.input.get(..len).and_then(Event::reorder_drop_payload)
                 else {
-                    return self.refuse("invalid reorder event");
+                    return Err(self.refuse("invalid reorder event"));
                 };
                 event
             }
-            _ => return self.refuse(&format!("unknown event kind {kind}")),
+            _ => return Err(self.refuse(&format!("unknown event kind {kind}"))),
         };
-        let out = match self.host.as_mut() {
-            Some(h) => h.dispatch_at(view, event, now_ms),
-            None => not_booted(),
-        };
-        self.emit(out)
+        Ok(event)
     }
 
     /// Consume the exact120-byte paired transform packet from the owned input buffer.

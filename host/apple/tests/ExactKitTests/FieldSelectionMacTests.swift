@@ -140,6 +140,7 @@ final class FieldSelectionMacTests: XCTestCase {
         window.makeFirstResponder(editor)
         editor.setSelectedRange(NSRange(location: 3, length: 0))
         editor.insertText("X", replacementRange: editor.selectedRange())
+        session.drainFill() // the edit's `input` goes to the owner at the end of the turn
         XCTAssertTrue(result.paragraphText.hasPrefix("seeX @a.ts now|1|4-4|"), result.paragraphText)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString("PASTE", forType: .string)

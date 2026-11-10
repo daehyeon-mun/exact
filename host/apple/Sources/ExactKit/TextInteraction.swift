@@ -3,6 +3,31 @@
 import CoreText
 #if os(macOS)
 import AppKit
+
+extension Presenter {
+    /// A batch supplies a paragraph's props and runs separately. Publish their
+    /// final accessibility values before announcements and focus processing.
+    func queueTextAccessibility(_ node: NodeView) -> Bool {
+        guard isApplying else { return false }
+        if !node.textAccessibilityQueued {
+            node.textAccessibilityQueued = true
+            pendingTextAccessibility.append(WeakNodeView(view: node))
+        }
+        return true
+    }
+
+    func flushTextAccessibility() {
+        let pending = pendingTextAccessibility
+        pendingTextAccessibility.removeAll(keepingCapacity: true)
+        for entry in pending {
+            guard let node = entry.view else { continue }
+            node.textAccessibilityQueued = false
+            guard views[node.id] === node else { continue }
+            node.updateTextAccessibility(committing: true)
+            node.updateRoleAccessibility(committing: true)
+        }
+    }
+}
 #else
 import UIKit
 #endif
@@ -109,8 +134,11 @@ extension NodeView {
         let shown = visibleParagraphText.trimmingCharacters(in: .whitespacesAndNewlines)
         return shown.isEmpty || shown == label ? nil : shown
     }
-    func updateTextAccessibility() {
+    func updateTextAccessibility(committing: Bool = false) {
         guard isParagraph else { return }
+        #if os(macOS)
+        if !committing, presenter?.queueTextAccessibility(self) == true { return }
+        #endif
         let label = props["accessibilityLabel"] ?? visibleParagraphText
         #if os(macOS)
         setAccessibilityElement(true)

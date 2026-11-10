@@ -19,7 +19,9 @@ final class PressWashMacTests: XCTestCase {
     /// A pressable button (1): rounded, bordered, filled, with a label (2)
     /// in black on white, 18 pt in a 20 pt line so its ink overflows the
     /// line box and AppKit draws it on a content layer of its own.
-    private func fixture(zoom: Double = 1) -> Presenter {
+    /// `labelGround`: the label paints a ground of its own, so it is a decorated text box, which AppKit draws
+    /// rather than a raster (`canRasterText`).
+    private func fixture(zoom: Double = 1, labelGround: Bool = false) -> Presenter {
         _ = NSApplication.shared
         // A session's presenter, whose text engine lays out and draws the label.
         let session = ExactApp.shared.makeSession(label: "press-wash")
@@ -33,10 +35,11 @@ final class PressWashMacTests: XCTestCase {
         window.contentView = p.viewport
         var button: [String: Any] = ["background_color": [255.0, 255.0, 255.0, 255.0], "border_width": 1.0, "border_color_top": [212.0, 212.0, 216.0, 255.0]]
         for corner in ["top_left", "top_right", "bottom_right", "bottom_left"] { button["border_radius_" + corner] = 8.0 }
+        var label: [String: Any] = ["font_size": 18.0, "line_height": "20px", "text_color": [0.0, 0.0, 0.0, 255.0], "white_space": "nowrap"]
+        if labelGround { label["background_color"] = [255.0, 255.0, 255.0, 255.0] }
         p.apply(wireBatch([
             ["op": "create", "id": 1, "kind": "view", "props": ["testId": "check"], "style": button],
-            ["op": "create", "id": 2, "kind": "text", "props": ["text": "Check account"],
-             "style": ["font_size": 18.0, "line_height": "20px", "text_color": [0.0, 0.0, 0.0, 255.0], "white_space": "nowrap"]],
+            ["op": "create", "id": 2, "kind": "text", "props": ["text": "Check account"], "style": label],
             ["op": "children", "id": 1, "ids": [2]],
             ["op": "roots", "ids": [1]],
             ["op": "frame", "id": 1, "x": 20.0, "y": 20.0, "w": 200.0, "h": 40.0],
@@ -231,8 +234,7 @@ final class PressWashMacTests: XCTestCase {
     func testTheWashCopyDrawsWhatAppKitDrewAgain() throws {
         for zoom in [1, 1.2] {
             session?.destroy(); window?.orderOut(nil)
-            let p = fixture(zoom: zoom)
-            // Small enough that AppKit draws it at both scales, not a raster (`textIsSmall`).
+            let p = fixture(zoom: zoom, labelGround: true)
             p.apply(wireBatch([["op": "frame", "id": 2, "x": 10.0, "y": 10.0, "w": 100.0, "h": 20.0]]))
             window.orderFrontRegardless()
             settle()

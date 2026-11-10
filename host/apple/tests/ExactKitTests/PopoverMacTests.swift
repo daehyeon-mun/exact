@@ -4,6 +4,88 @@ import XCTest
 @testable import ExactKit
 
 final class PopoverMacTests: XCTestCase {
+    func testClosedPopoverMountKeepsTheKeyLoopLazyAndItsInputHidden() throws {
+        let p = fixture(), window = try XCTUnwrap(p.viewport.window)
+        defer { p.menus.reset() }
+        let previousMode = !KeyboardNavigation.on
+        p.keyViewLoopMode = previousMode
+        let focused = window.firstResponder
+        var focusEvents = 0
+        p.onFocus = { _ in focusEvents += 1 }
+        p.apply(wireBatch([
+            ["op": "create", "id": 10, "kind": "view", "props": ["id": "closed", "popover": "manual"]],
+            ["op": "create", "id": 11, "kind": "input", "handlers": ["focus"], "props": ["autofocus": "true", "value": "draft"]],
+            ["op": "children", "id": 10, "ids": [11]],
+            ["op": "children", "id": 1, "ids": [2, 6, 3, 10]],
+            ["op": "frame", "id": 10, "x": 0, "y": 0, "w": 240, "h": 60],
+            ["op": "frame", "id": 11, "x": 10, "y": 10, "w": 200, "h": 24],
+        ]))
+        let pop = try XCTUnwrap(p.views[10]), input = try XCTUnwrap(p.views[11])
+        XCTAssertEqual(p.keyViewLoopMode, previousMode, "mounting a closed popover must not rebuild the page's key loop")
+        XCTAssertTrue(pop.isHidden)
+        XCTAssertTrue(input.isAccessibilityHidden())
+        XCTAssertFalse(input.field?.canBecomeKeyView ?? true)
+        XCTAssertTrue(window.firstResponder === focused)
+        XCTAssertEqual(focusEvents, 0, "a closed popover's autofocus waits for opening")
+        p.flushKeyViewLoop()
+        XCTAssertFalse(p.viewport.nextKeyView === input.field)
+        p.menus.action("showPopover", ["closed"])
+        XCTAssertFalse(pop.isHidden)
+        XCTAssertFalse(input.isAccessibilityHidden())
+        XCTAssertTrue(input.field?.isEditable ?? false)
+        p.menus.close(pop)
+        XCTAssertTrue(pop.isHidden)
+        XCTAssertTrue(input.isAccessibilityHidden())
+    }
+
+    func testPopoverRemovedDuringItsCreationBatchShowsAsOrdinaryContent() throws {
+        let p = fixture()
+        p.apply(wireBatch([
+            ["op": "create", "id": 10, "kind": "view", "props": ["popover": "manual"]],
+            ["op": "create", "id": 11, "kind": "input"],
+            ["op": "children", "id": 10, "ids": [11]],
+            ["op": "children", "id": 1, "ids": [2, 6, 3, 10]],
+            ["op": "props", "id": 10, "clear": ["popover"]],
+        ]))
+        XCTAssertFalse(try XCTUnwrap(p.views[10]).isHidden)
+        XCTAssertFalse(try XCTUnwrap(p.views[11]).isAccessibilityHidden())
+    }
+
+    func testScopedRefreshKeepsAncestorNamesAndExternalReferencesCurrent() throws {
+        let p = fixture()
+        defer { p.menus.reset() }
+        p.apply(wireBatch([
+            ["op": "create", "id": 8, "kind": "text", "props": ["id": "caption", "text": "First caption"]],
+            ["op": "children", "id": 5, "ids": [8]],
+            ["op": "props", "id": 6, "set": ["accessibilityLabelledBy": "caption"]],
+            ["op": "create", "id": 9, "kind": "input", "props": ["id": "outside", "accessibilityDescribedBy": "caption"]],
+            ["op": "create", "id": 10, "kind": "view", "props": ["id": "other-popover", "popover": "manual"]],
+            ["op": "create", "id": 11, "kind": "input"],
+            ["op": "children", "id": 10, "ids": [11]],
+            ["op": "children", "id": 1, "ids": [2, 6, 9, 3, 10]],
+            ["op": "frame", "id": 9, "x": 10, "y": 50, "w": 200, "h": 24],
+            ["op": "frame", "id": 10, "x": 0, "y": 0, "w": 240, "h": 60],
+            ["op": "frame", "id": 11, "x": 10, "y": 10, "w": 200, "h": 24],
+        ]))
+        let caption = try XCTUnwrap(p.views[8]), second = try XCTUnwrap(p.views[10])
+        let outside = try XCTUnwrap(p.views[9]?.field), inside = try XCTUnwrap(p.views[11])
+        let window = try XCTUnwrap(p.viewport.window)
+        XCTAssertTrue(window.makeFirstResponder(outside))
+        // No runner batch accompanies a host visibility refresh. Exercise its own
+        // accessibility pass, including references outside the refreshed subtree.
+        caption.props["text"] = "Second caption"
+        p.menus.refresh(caption)
+        p.menus.refresh(second)
+        XCTAssertEqual(p.views[5]?.accessibilityLabel(), "Second caption", "the scoped node's parent derives its name")
+        XCTAssertEqual(p.views[6]?.accessibilityLabel(), "Second caption", "aria-labelledby crosses the scope")
+        XCTAssertEqual(outside.accessibilityHelp(), "Second caption", "aria-describedby crosses the scope")
+        XCTAssertTrue(inside.isAccessibilityHidden(), "a closed popup's input stays outside the accessibility tree")
+        XCTAssertTrue(outside.currentEditor() === window.firstResponder, "an unrelated focused field keeps focus")
+        p.apply(wireBatch([["op": "props", "id": 10, "clear": ["popover"]]]))
+        XCTAssertFalse(second.isHidden)
+        XCTAssertFalse(inside.isAccessibilityHidden(), "removing popover restores the native input gate")
+    }
+
     func testContextMenuCommandsSeeAndCancelNativeTracking() throws {
         try XCTSkipIf(ExactEnv.agentMode, "this regression exercises NSMenu")
         for command in ["hidePopover", "togglePopover"] {
@@ -259,6 +341,8 @@ final class PopoverMacTests: XCTestCase {
         XCTAssertTrue(field.currentEditor() === window.firstResponder)
         XCTAssertTrue(p.views[4]?.field === field)
         XCTAssertFalse(p.views[6]!.inert, "the page stays interactive")
+        // A popover's show marks the key-view loop stale; it is rebuilt before a Tab, as the view's key monitor does.
+        p.flushKeyViewLoop()
         XCTAssertTrue(p.views[2]!.nextKeyView === field, "focus enters after the invoker, not at the authored popover position")
         XCTAssertTrue(field.nextKeyView === p.views[5])
         XCTAssertTrue(p.views[5]!.nextKeyView === p.views[6], "Tab exits to the next page control")
@@ -740,6 +824,20 @@ final class PopoverMacTests: XCTestCase {
         p.menus.sync()
         XCTAssertEqual(p.menus.presented.map(\.id), [manual.id], "manual descendants stay shown after auto closes")
     }
+    func testResetRetiresOnlyItsOwnRetainedLayers() {
+        let first = fixture(), second = fixture()
+        func layers(_ p: Presenter) -> Int { p.viewport.subviews.filter { $0 is PopoverLayer }.count }
+        first.press(2); first.press(5)
+        second.press(2); second.press(5)
+        XCTAssertEqual(layers(first), 1)
+        XCTAssertEqual(layers(second), 1)
+        first.reset()
+        XCTAssertEqual(layers(first), 0)
+        XCTAssertEqual(layers(second), 1)
+        second.reset()
+        XCTAssertEqual(layers(second), 0)
+    }
+
     func testRemovalInertAndResetRetireTheTopLayer() {
         let p = fixture(), pop = p.views[3]!
         p.press(2)

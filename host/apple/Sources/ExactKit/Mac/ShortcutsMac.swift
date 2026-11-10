@@ -383,6 +383,8 @@ final class ShortcutHost: NSObject, NSMenuItemValidation {
         if let event, !shortcut.matches(event) { return "" }
         return shortcut.keyEquivalent
     }
+    /// The nodes the turn changed, set before a deferred sync (nil: all).
+    var freshViews: Set<UInt32>?
     func sync() {
         if let selected = DevMenu.session, selected.presenter !== presenter,
            let menu = viewMenu, menu.supermenu === NSApp.mainMenu { return }
@@ -400,6 +402,19 @@ final class ShortcutHost: NSObject, NSMenuItemValidation {
         var live: Set<UInt32> = []
         var chords: [(NSMenuItem, Shortcut?)] = []
         appWide = []
+        var batchedFaces: [UInt32: ButtonFace] = [:]
+        // A known item's symbol is kept unless the turn changed its node.
+        let fresh = freshViews
+        freshViews = nil
+        let known = { (view: NodeView) -> Bool in fresh.map { !$0.contains(view.id) } == true && self.itemSymbols[view.id] != nil }
+        if let many = presenter?.buttonFaces {
+            let ids = nodes().filter { view in
+                view.isButton && !known(view)
+                    && (declarations(view).contains { $0.modifiers.contains(.command) }
+                        || view.props["menuPlacement"] != nil || presenter?.toolbar.contains(view) == true)
+            }.map(\.id)
+            if !ids.isEmpty { for (id, face) in zip(ids, many(ids)) { batchedFaces[id] = face } }
+        }
         for view in nodes() {
             // A platform alternative does not create a second menu item.
             let shortcut = declarations(view).first(where: { $0.modifiers.contains(.command) })
@@ -416,7 +431,7 @@ final class ShortcutHost: NSObject, NSMenuItemValidation {
             (item as? AccessibleMenuItem)?.owner = view
             item.title = title(view)
             // A symbol a button shows is its item's image (LLP 1069.011.000 D7).
-            let symbol = view.isButton ? view.face?.symbol : nil
+            let symbol = view.isButton ? (known(view) ? itemSymbols[view.id]! : (batchedFaces[view.id] ?? view.face)?.symbol) : nil
             if itemSymbols[view.id] != .some(symbol) {
                 itemSymbols[view.id] = .some(symbol)
                 item.image = symbol.flatMap { FaceSymbol.image($0) }

@@ -41,10 +41,7 @@ extension Runtime {
     /// A text field's value as it moves: HTML's `input` (LLP 1069.001 D4),
     /// with its selection when the host has one (kind 40, else 23).
     func input(_ view: UInt32, _ value: String, selection: FieldSelection? = nil, now: Double) -> Batch {
-        return on {
-            let n = write(selection?.payload(value) ?? value)
-            return read(exact_dispatch(rt, view, selection == nil ? 23 : 40, n, now))
-        }
+        later(view, selection == nil ? 23 : 40, selection?.payload(value) ?? value, now: now)
     }
     /// The scripted replacement's one input, with its DOM inputType (kind 48).
     func replacementInput(_ view: UInt32, _ value: String, _ selection: FieldSelection, now: Double) -> Batch {
@@ -98,6 +95,15 @@ extension Runtime {
         return on(busy: ButtonFace()) {
             let len = exact_press_face(rt, view)
             return ButtonFace(json: Data(bytes: exact_out(rt), count: Int(len)))
+        }
+    }
+    /// Several buttons' faces in one owner call.
+    func buttonFaces(_ views: [UInt32]) -> [ButtonFace] {
+        return on(busy: views.map { _ in ButtonFace() }) {
+            views.map { view in
+                let len = exact_press_face(rt, view)
+                return ButtonFace(json: Data(bytes: exact_out(rt), count: Int(len)))
+            }
         }
     }
     /// A select's options and the one it shows (LLP 1069.001 D5).

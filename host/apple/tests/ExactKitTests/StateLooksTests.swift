@@ -81,6 +81,35 @@ final class StateLooksTests: XCTestCase {
     }
 
     #if os(macOS)
+    func testTextEntryFocusLooksSurviveOutlineSuppressionAndRestyling() throws {
+        let (p, _) = try fixture()
+        p.focusByPointer = true
+        for (id, kind, appearance) in [(2, "input", "auto"), (3, "input", "none"), (4, "textarea", "auto"), (5, "textarea", "none")] {
+            var style = base(blue)
+            style["appearance"] = appearance
+            style["outline_style"] = "none"
+            p.apply(wireBatch([
+                ["op": "create", "id": id, "kind": kind, "props": ["value": "Draft"], "style": style],
+                ["op": "roots", "ids": [1, id]],
+                ["op": "frame", "id": id, "x": 0.0, "y": 0.0, "w": 200.0, "h": 60.0],
+            ]))
+            let node = try XCTUnwrap(p.views[UInt32(id)])
+            let control: NSView = try XCTUnwrap(node.field as NSView? ?? node.textArea)
+            XCTAssertTrue(window.makeFirstResponder(control))
+            XCTAssertTrue(node.focusVisible, "text entry matches even when the pointer focuses it")
+            XCTAssertEqual(node.style["border_color_top"], ink(green))
+            XCTAssertFalse(node.fieldFocused, "outline:none suppresses the stand-in ring")
+            XCTAssertNil(node.layer?.sublayers?.first { $0.name == "exact.fieldFocus" })
+            style["border_color_top"] = red
+            p.apply(wireBatch([["op": "style", "id": id, "style": style]]))
+            XCTAssertTrue(node.focusVisible)
+            XCTAssertEqual(node.style["border_color_top"], ink(green), "restyling keeps the focused look")
+            XCTAssertTrue(window.makeFirstResponder(nil))
+            XCTAssertFalse(node.focusVisible)
+            XCTAssertEqual(node.style["border_color_top"], ink(red), "blur restores the newest base")
+        }
+    }
+
     func testHoverAndFocusVisibleLooksStandInUnderThePress() throws {
         let (p, v) = try fixture()
         p.setHoverPath([v])

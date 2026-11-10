@@ -1256,10 +1256,12 @@ final class SplitMacTests: XCTestCase {
         XCTAssertTrue(box.isDescendant(of: columns.detailPane))
         let reply = agent.tap(["id": Int(box.id), "hover": true])
         XCTAssertNil(reply["error"], "\(reply)")
+        session.drainFill() // a hover goes to the owner at the end of the turn
         XCTAssertTrue(session.presenter.hoveredNodes.contains { $0 === box })
         XCTAssertEqual(try node("hot").accessibleText, "hot")
         // Over the list: the box is left.
         XCTAssertNil(agent.tap(["id": Int(try node("row-b").id), "hover": true])["error"])
+        session.drainFill()
         XCTAssertFalse(session.presenter.hoveredNodes.contains { $0 === box })
         XCTAssertEqual(try node("hot").accessibleText, "cold")
     }

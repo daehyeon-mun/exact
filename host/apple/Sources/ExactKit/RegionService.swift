@@ -11,7 +11,7 @@ enum RegionTextExecutor {
         #if os(iOS) || os(tvOS)
         q.maxConcurrentOperationCount = TextRasterizer.concurrency
         #else
-        q.maxConcurrentOperationCount = 2
+        q.maxConcurrentOperationCount = RasterScheduling.rasterWorkers
         #endif
         return q
     }()

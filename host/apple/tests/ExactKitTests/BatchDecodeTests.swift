@@ -278,9 +278,9 @@ extension BatchDecodeTests {
             session.apply(session.runtime.press(change.id, now: 0))
             // The search hears each keystroke (`input`); it has no `change`.
             let search = try XCTUnwrap(node("station-search"))
-            let typed = session.runtime.input(search.id, "Palo", now: 0)
-            XCTAssertNil(typed.error)
-            session.apply(typed)
+            // The keystroke's `input` waits for the end of the turn; the drain sends and lands it.
+            _ = session.runtime.input(search.id, "Palo", now: 0)
+            session.drainFill()
             for _ in 0..<8 { session.apply(session.runtime.pump(now: 0)); drain() }
             session.apply(session.runtime.advance(now: 60_000))
             for width: CGFloat in [390, 900] { session.resize(CGSize(width: width, height: 700)); drain() }

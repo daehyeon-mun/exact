@@ -44,6 +44,8 @@ private final class BlurBackground: NSVisualEffectView {
 }
 
 package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
+    /// `canRasterText` as one text refresh pass answered it (that pass's epoch, the answer).
+    var rasterMemo: (UInt, Bool) = (0, false)
     package override func selectAll(_ sender: Any?) { presenter?.selection.selectAll() }
 
     package let id: UInt32
@@ -88,7 +90,8 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     var columnRecord: ColumnRecord?  // LLP 1093 D7: fragments or columns
     var cachedTextLayout: (width: CGFloat, paragraph: Paragraph)?
     var liveText: String?
-    package var props: [String: String] = [:] { didSet { presenter?.propsChanged(self); presenter?.mouseChain.bubbledPress?.validate() } }
+    package var props: [String: String] = [:] { didSet { ownARIAAttributes = nil; presenter?.propsChanged(self); presenter?.mouseChain.bubbledPress?.validate() } }
+    private var ownARIAAttributes: [NSAccessibility.Attribute]?
     var nativeActiveRefusals: [String: String] = [:]
     package var style: NodeStyle = [:]
     /// What the host's own writers hid (a covered route, a tab a native control
@@ -127,6 +130,11 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     package var rotate: CGFloat = 0
     weak package var presenter: Presenter?
     package var textArea: NSTextView?
+    /// The style and frame ops last applied, so a batch that sends the same again (a subtree re-attached)
+    /// costs nothing here.
+    var lastStyleOp: NodeStyle?
+    var lastFrameOp: NSRect?
+    var lastBackingScale: CGFloat?
     var textAreaScroll: NSScrollView?
     package var field: NSTextField?
     /// The page's own field, while `field` is the one the window's toolbar hosts (LLP 1115.002 D2, HeaderMac.swift).
@@ -161,6 +169,9 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     /// What the host last wrote to AppKit accessibility (props and form state).
     struct AccessibilityWrite: Equatable { var enabled = true; var identifier: String?; var label: String?; var help: String?; var required = false; var formInitialized = false }
     var lastAccessibilityWrite = AccessibilityWrite()
+    var textAccessibilityQueued = false
+    /// Availability at the last form sync, whether the node or its native control serves it.
+    var accessibilityAvailability: Bool?
     var boxGradient: CAGradientLayer?
     var imageLayer: CALayer?
     /// While it flies as a shared element (LLP 1013.000 D4): where its image is drawn.
@@ -386,17 +397,6 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
             for rect in inlineRects(run) { addCursorRect(rect, cursor: .pointingHand) }
         }
     }
-    func syncHoverTracking() {
-        let wants = handlers.contains("hover") || handlers.contains("pointermove") || inlineText.contains(where: { $0.handlers.contains("hover") })
-        if wants, tracking == nil {
-            let t = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
-            addTrackingArea(t)
-            tracking = t
-        } else if !wants, let t = tracking {
-            removeTrackingArea(t)
-            tracking = nil
-        }
-    }
     package override func mouseEntered(with event: NSEvent) { presenter?.trackPointer(event) }
     package override func mouseMoved(with event: NSEvent) {
         presenter?.trackPointer(event)
@@ -436,7 +436,15 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         return own.isEmpty ? nil : own
     }
     package override func accessibilityAttributeNames() -> [NSAccessibility.Attribute] {
-        super.accessibilityAttributeNames() + (["AXLanguage"] + Self.ariaAttributes.filter { ariaAttribute($0) != nil }).map { .init(rawValue: $0) }
+        if ownARIAAttributes == nil {
+            ownARIAAttributes = Self.ariaAttributes.filter { $0 != "AXEnabled" && ariaAttribute($0) != nil }.map { .init(rawValue: $0) }
+        }
+        var attributes = super.accessibilityAttributeNames()
+        // Form sync already advertises AXEnabled. Only an uninitialized view
+        // needs ancestry to decide its presence; the value always reads ancestry.
+        if !attributes.contains(.enabled), ariaUnavailable { attributes.append(.enabled) }
+        attributes.append(.init(rawValue: "AXLanguage"))
+        return attributes + (ownARIAAttributes ?? [])
     }
     package override func accessibilityAttributeValue(_ attribute: NSAccessibility.Attribute) -> Any? {
         if attribute == .parent, let parent = dialogWebArea ?? modalAccessibilityParent { return parent }
@@ -679,6 +687,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         presenter?.videoVisibility?.changed()
         // The list window and the text bands follow the scroll; they are not
         // part of it (`Presenter.scrolled`).
+        if let o = scroll?.contentView.bounds.origin { presenter?.textScroll = (id, o.y) }
         presenter?.scrolled()
         repaintThrough(); queueScrollEvent(); scrollEndMoved()
     }
@@ -767,6 +776,12 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         // overflow and transformed or placed children still need the full walk.
         if overlay == nil, !frame.contains(point), (clipsToBounds || subviews.isEmpty),
            plane == nil { return nil }
+        // Outside every descendant's frame, nothing here can be hit.
+        if overlay == nil, plane == nil, !frame.contains(point), let sup = superview,
+            let e = HitExtent.of(self), !sup.convert(e, from: self).contains(point)
+        {
+            return nil
+        }
         NodeView.hitDepth += 1
         if NodeView.hitDepth == 1 { NodeView.hitInert = [:] }
         defer { NodeView.hitDepth -= 1; if NodeView.hitDepth == 0 { NodeView.hitInert = nil } }
@@ -844,59 +859,6 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         return win.convertToScreen(drawnRect(bounds))
     }
 
-    /// Whether this view draws in the dark appearance. The **owning view's**
-    /// appearance, not `NSAppearance.currentDrawing()`: `currentDrawing()`
-    /// names whatever is drawing at that instant, and colours are not all
-    /// applied inside a draw — a field's `textColor` is assigned in
-    /// `applyStyle`. @ref LLP 1034 D2
-    var drawsDark: Bool {
-        effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-    }
-
-    /// The four channels a colour row carries, resolved. A fixed colour is
-    /// the four; a `light-dark()` pair is two fours and this picks one
-    /// (LLP 1034 D1). Anything else is not a colour.
-    func channels(_ key: String, dark: Bool? = nil) -> [Double]? {
-        style[key].flatMap { $0.channels(dark: dark ?? drawsDark, contrast: drawsHighContrast, elevated: window is SheetWindow, tint: ownTint(for: $0)) }
-    }
-
-    /// Whether any colour on this node is a pair — what says an appearance
-    /// change is something to this view rather than nothing.
-    var hasSchemeColor: Bool {
-        style.values.contains { $0.isSchemeColor || $0.isSchemeGradient || $0.containsSystemColor }
-    }
-
-    /// The appearance changed under this view. A repaint is not enough: the
-    /// text engine caches a paragraph spec and a laid-out paragraph, and a
-    /// `Run` carries a concrete colour, so ink from the previous appearance
-    /// would survive a redisplay. Inline text nodes are not in the native
-    /// hierarchy, so the paragraph that owns them is invalidated too, and
-    /// the colours assigned outside a draw are re-applied. @ref LLP 1034 D2
-    package override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        presenter?.tables.appearanceChanged(self); refreshGroupedSeparator(); presenter?.navigation.split.recolor(self)
-        if let regions = presenter?.session?.regions, regions.owns(self) { regions.geometryChanged() }
-        // An `svg`'s paints are resolved again; paint motion hears the appearance (LLP 1062 D4).
-        presenter?.svg.reappear(id, dark: drawsDark, clock: presenter?.session?.clock, tint: viewTint); presenter?.session?.noteAppearance(self)
-        // A path icon's fill is a resolved colour; an image view resolved its tint as it drew.
-        tintIconShape()
-        guard hasSchemeColor || fieldGround != nil || inlineText.contains(where: { $0.hasSchemeColor }) else { return }
-        reapplyColors()
-    }
-    /// A system colour changed under this view (the accent, LLP 1095 D5):
-    /// what it resolved is applied again, as for an appearance change; an
-    /// untinted symbol follows the accent, so it counts too.
-    func systemColorsChanged() {
-        presenter?.navigation.split.recolor(self)
-        guard hasSchemeColor || hasSymbolLeaf || inlineText.contains(where: { $0.hasSchemeColor }) else { return }
-        reapplyColors()
-    }
-    func reapplyColors() {
-        paragraphOwner.invalidateText()
-        paragraphOwner.needsDisplay = true
-        applyStyle(style)
-        needsDisplay = true
-    }
     package func number(_ key: String, _ fallback: CGFloat = 0) -> CGFloat {
         if let n = style[key]?.number { return CGFloat(n) }
         return fallback
@@ -1133,7 +1095,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         (clipPath, clipRule) = (ClipPath.path(s["clip_path"]), ClipPath.rule(s["clip_path"]))
         // Inline text is unmounted run data. Its containing paragraph owns
         // the backing store; create this node's layer only when it mounts.
-        if kind != "text" || superview != nil { wantsLayer = true }
+        if kind != "text" || superview != nil { wantsLayer = true; layer?.drawsAsynchronously = true }
         applyBoxMask()
         applyFilter()
         // Scrolling and clipping come from the effective overflow the host
@@ -1291,6 +1253,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     package override func setFrameOrigin(_ newOrigin: NSPoint) {
         let moved = newOrigin != frame.origin
         super.setFrameOrigin(newOrigin)
+        if moved { HitExtent.changed() }
         if moved, !backdropOperations.isEmpty { applyBackdrop() }
     }
 
@@ -1300,6 +1263,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         let changed = newSize != frame.size
         super.setFrameSize(newSize)
         guard changed else { return }
+        HitExtent.changed()
         if let row = superview as? NodeView, row.style["appearance"] != nil { row.needsLayout = true } // its bezel (FormRowsMac.swift)
         if focusVisible { noteFocusRingMaskChanged() } // the ring follows the box
         layerPaintCache = nil
@@ -1332,12 +1296,18 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         pressMoves &+= 1
         if window == nil { holdPresenter?.mouseChain.bubbledPress?.cancel(in: self) }
         if window != nil { retint() }
+        if window != nil, !backdropOperations.isEmpty { applyBackdrop() }
         presenter?.transformGeometry.changed()
         presenter?.videoVisibility?.changed()
     }
 
     package override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        // Leaving the window, or coming back to one of the same scale, changes no pixel.
+        guard let scale = window?.backingScaleFactor else { return }
+        if scale == lastBackingScale { return }
+        lastBackingScale = scale
+
         if textRaster != nil || isParagraph { invalidateText(); needsDisplay = true } // raster and line boxes: the display's pixels
         // A border's device pixels follow the scale (`BoxLayerMac.swift`).
         if layerBoxEligible && hasBoxPaint { needsDisplay = true }
@@ -1436,7 +1406,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
             RasterGeometry.draw(ctx, AnimatedRasters.shared.frame(for: self) ?? bitmap.image, in: CGRect(origin: .zero, size: rect.size), tint: channels("tint_color").map { TextEngine.color($0).cgColor })
             ctx.restoreGState()
         }
-        let textDirty = Capture.capturing || canvasAbove != nil || textIsSmall ? rect : rect.intersection(presenter?.textVisibleRect(self) ?? visibleRect)
+        let textDirty = Capture.capturing || canvasAbove != nil ? rect : rect.intersection(presenter?.textVisibleRect(self) ?? visibleRect)
         if isParagraph, !textDirty.isEmpty, presenter?.session?.regions.owns(self) != true {
             // The same paragraph the kernel measured at this width, painted.
             let spec = paragraphSpec()
@@ -1489,8 +1459,20 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         // A canvas that wants input scrolls itself; the nodes' `wheel` is
         // still heard (review b5-b 2).
         if canvasInput?.wheel(event) == true { _ = wheel(event); return }
-        if presenter?.mouseDrags.transform.scroll(self, event: event) != true, !wheel(event) { super.scrollWheel(with: event) }
+        if presenter?.mouseDrags.transform.scroll(self, event: event) != true, !wheel(event) {
+            if let next = nextResponder { next.scrollWheel(with: event) } else { super.scrollWheel(with: event) }
+        }
     }
+    /// AppKit's cursor update is not forwarded while a scroll runs.
+    package override func cursorUpdate(with event: NSEvent) {
+        if presenter?.scrollRestFollow != nil { return }
+        super.cursorUpdate(with: event)
+    }
+    // A node's extent changes with its subviews.
+    package override func didAddSubview(_ subview: NSView) { super.didAddSubview(subview); HitExtent.changed() }
+    package override func willRemoveSubview(_ subview: NSView) { super.willRemoveSubview(subview); HitExtent.changed() }
+    var hitExtent: NSRect?
+    var hitExtentEpoch: UInt64 = .max
     package override func magnify(with event: NSEvent) {
         if presenter?.mouseDrags.transform.magnify(self, event: event) != true, !wheel(event) { super.magnify(with: event) }
     }

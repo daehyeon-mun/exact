@@ -179,6 +179,30 @@ extension Presenter {
             next = eventParent(of: view)
             #endif
         }
+        #if os(macOS)
+        // The whole path goes to the owner in one call and one commit.
+        if let onKeyPath, !applying, !resetting, handler == "key" || handler == "keyup" {
+            var entries: [(UInt32, String, Bool)] = []
+            if handler == "key" {
+                for node in path.reversed() where node.handlers.contains("keycapture") {
+                    var captured = press
+                    captured.capture = true
+                    entries.append((node.id, captured.payload, true))
+                }
+            }
+            for node in path where node.handlers.contains(handler) { entries.append((node.id, press.payload, false)) }
+            // An echoed key's path goes to the owner after AppKit has drawn its insertion.
+            if handler == "key", beginPassiveEcho(target, press, entries) { return false }
+            guard !entries.isEmpty else { return false }
+            defaultPrevented = false
+            propagationStopped = false
+            onKeyPath(entries, press.up)
+            let prevented = defaultPrevented
+            defaultPrevented = false
+            propagationStopped = false
+            return prevented
+        }
+        #endif
         var prevented = false
         func deliver(_ node: (id: UInt32, handlers: Set<String>), _ press: KeyPress) -> Bool {
             defaultPrevented = false

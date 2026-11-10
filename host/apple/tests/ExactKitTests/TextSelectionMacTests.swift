@@ -145,6 +145,35 @@ final class TextSelectionMacTests: XCTestCase {
         XCTAssertTrue(boxes.suffix(2).allSatisfy(\.isEmpty))
     }
 
+    func testClearingAnEmptySelectionDoesNotWalkThePage() throws {
+        final class WalkProbe: NSView {
+            var reads = 0
+            override var subviews: [NSView] {
+                get { reads += 1; return super.subviews }
+                set { super.subviews = newValue }
+            }
+        }
+        let p = fixture(measured: true), node = try XCTUnwrap(p.views[2])
+        let probe = WalkProbe(frame: .zero)
+        p.root.addSubview(probe)
+        var events = 0
+        p.onSelectionChange = { _, _, _, _, _ in events += 1 }
+        p.selection.structureChanged()
+        probe.reads = 0
+        p.selection.clear()
+        XCTAssertEqual(probe.reads, 0, "clearing an untouched selection has no page-sized work")
+        XCTAssertEqual(events, 0)
+        p.selection.set(node, FieldSelection(start: 3, end: 3))
+        XCTAssertTrue(p.selection.isActive, "a collapsed caret still owns selection endpoints")
+        p.selection.structureChanged()
+        probe.reads = 0
+        p.selection.clear()
+        XCTAssertFalse(p.selection.isActive, "the fast path must release collapsed endpoints")
+        XCTAssertNil(p.selection.range(node))
+        XCTAssertEqual(probe.reads, 0)
+        XCTAssertEqual(events, 0)
+    }
+
     func testSelectionRectanglesFollowColumnFragments() throws {
         let p = fixture(measured: true), node = try XCTUnwrap(p.views[2])
         node.props = ["id": "p", "text": "Alpha\nbeta\ngamma\ndelta"]

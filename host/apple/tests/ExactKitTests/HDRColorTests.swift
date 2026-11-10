@@ -111,15 +111,9 @@ final class HDRColorTests: XCTestCase {
         XCTAssertNil(node.cachedTextSpec, "a range query outside drawing does not shape text")
         for _ in 0..<2 { XCTAssertEqual(node.drawnHeadroom(drawing: true), 0) }
         XCTAssertNotNil(node.cachedTextSpec)
-        #if os(macOS)
-        XCTAssertTrue(node.textIsSmall)
-        #endif
         presenter.apply(wireBatch([["op": "style", "id": 1, "style": ["text_color": fourTimesWhite.any]]]))
         XCTAssertNil(node.cachedTextSpec)
         for _ in 0..<2 { XCTAssertEqual(node.drawnHeadroom(drawing: true), 4, accuracy: 0.001) }
-        #if os(macOS)
-        XCTAssertFalse(node.textIsSmall, "small HDR text still needs a raster")
-        #endif
         presenter.apply(wireBatch([["op": "props", "id": 1, "set": ["text": "Changed"]]]))
         XCTAssertNil(node.cachedTextSpec)
         XCTAssertEqual(node.drawnHeadroom(drawing: false), 0)
@@ -133,9 +127,6 @@ final class HDRColorTests: XCTestCase {
         }
         presenter.apply(wireBatch([["op": "style", "id": 1, "style": ["text_color": [255, 255, 255, 255]]]]))
         XCTAssertEqual(node.drawnHeadroom(drawing: true), 0)
-        #if os(macOS)
-        XCTAssertTrue(node.textIsSmall)
-        #endif
     }
 
     #if os(macOS)
@@ -152,7 +143,6 @@ final class HDRColorTests: XCTestCase {
         for (appearance, peak): (NSAppearance.Name, Float) in [(.aqua, 1), (.darkAqua, 4), (.aqua, 1)] {
             node.appearance = NSAppearance(named: appearance)
             XCTAssertEqual(node.drawnHeadroom(drawing: true), peak, accuracy: 0.001)
-            XCTAssertEqual(node.textIsSmall, peak <= 1)
         }
     }
     #endif
@@ -351,9 +341,8 @@ final class HDRColorTests: XCTestCase {
     }
 
     #if os(macOS)
-    /// On macOS a paragraph too small to repay a surface draws in its layer,
-    /// unless it is HDR: only a raster's layers follow the limit.
-    func testSmallHDRTextRastersOnMacOS() throws {
+    /// Small SDR and HDR paragraphs both use raster surfaces; HDR shadows keep their own layer.
+    func testSmallSDRAndHDRTextRasterOnMacOS() throws {
         _ = NSApplication.shared
         let session = ExactApp.shared.makeSession(label: "text-small-hdr")
         let presenter = session.presenter
@@ -376,8 +365,9 @@ final class HDRColorTests: XCTestCase {
             ["op": "frame", "id": 4, "x": 0.0, "y": 80.0, "w": 48.0, "h": 24.0],
         ], timers: false, motion: false, clock: nil, error: nil))
         let sdr = try XCTUnwrap(presenter.views[2]), ink = try XCTUnwrap(presenter.views[3]), shadow = try XCTUnwrap(presenter.views[4])
-        XCTAssertTrue(sdr.textIsSmall)
-        XCTAssertFalse(sdr.rastersText)
+        XCTAssertTrue(sdr.rastersText)
+        XCTAssertTrue(presenter.textRasters.ensure(sdr, urgent: true))
+        XCTAssertNotNil(sdr.textRaster)
         XCTAssertTrue(ink.rastersText, "HDR ink")
         XCTAssertTrue(shadow.rastersText, "an HDR shadow")
         XCTAssertTrue(presenter.textRasters.ensure(shadow, urgent: true))

@@ -209,7 +209,8 @@ final class ResetGateTests: XCTestCase {
             _ = session.runtime.focusEvent(field, entering: true, target: "field", related: nil, now: session.now())
             _ = session.runtime.blur(field, now: session.now())
         }
-        XCTAssertEqual(held, ["focus(_:now:)", "focusEvent(_:entering:target:related:now:)", "blur(_:now:)"])
+        // Focus, focusin and blur reach the runtime through `send`, the name a held one has.
+        XCTAssertEqual(held, ["send(_:_:_:now:)", "send(_:_:_:now:)", "send(_:_:_:now:)"])
         XCTAssertEqual(replays, [])
     }
 

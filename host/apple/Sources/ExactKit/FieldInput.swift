@@ -80,6 +80,17 @@ extension FieldSelections {
         let outer = presenter.defaultPrevented
         presenter.defaultPrevented = false
         let heard = node.handlers.contains("beforeinput")
+        #if os(macOS)
+        // An echoed key's beforeinput goes with its key path, after the insertion is drawn.
+        if edit.cancelable,
+            presenter.recordPassiveBeforeInput(
+                node, heard, edit.payload(value, selection), value: value,
+                selection: node.textArea?.selectedRange() ?? NSRange(location: selection.start, length: selection.end - selection.start))
+        {
+            inputDetails[node.id] = edit
+            return true
+        }
+        #endif
         if heard { onBeforeInput?(node.id, value, selection, edit) }
         let prevented = presenter.defaultPrevented && edit.cancelable
         presenter.defaultPrevented = outer

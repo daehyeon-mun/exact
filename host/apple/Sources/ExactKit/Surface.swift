@@ -77,9 +77,22 @@ extension NodeView {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         if s.clipped?.mask === s.clip { s.clipped?.mask = nil }
         if s.clippedSelf { clipsToBounds = true }
+        #if os(macOS)
+        // The node's own paint goes back in the transaction that takes the surface away: drawn later (an
+        // asynchronous layer), the box showed nothing for a frame (a switch thumb).
+        if let l = layer {
+            let async = l.drawsAsynchronously
+            l.drawsAsynchronously = false
+            surfaceChanged()
+            displayIfNeeded()
+            l.drawsAsynchronously = async
+        }
+        #endif
         s.removeFromSuperlayer()
         CATransaction.commit()
+        #if !os(macOS)
         surfaceChanged()
+        #endif
     }
 
     private func surfaceChanged() {

@@ -7,6 +7,13 @@ import XCTest
 /// navigation order, AppKit's own roles and names, each element joined to
 /// its view. Run by `bun host/apple/build.mjs --test`.
 private extension NSView {
+    nonisolated(unsafe) static var paragraphValueWrites: [String] = []
+    @objc func recordingParagraphValue(_ value: Any?) {
+        if let node = self as? NodeView, node.props["testId"] == "batched-paragraph" {
+            NSView.paragraphValueWrites.append(value.map { String(describing: $0) } ?? "nil")
+        }
+        recordingParagraphValue(value)
+    }
     nonisolated(unsafe) static var hiddenGetterCalls = 0
     /// Exchanged with `isAccessibilityHidden()`; the call inside is the original.
     @objc func countingIsAccessibilityHidden() -> Bool {
@@ -17,6 +24,66 @@ private extension NSView {
 
 final class AccessibilityTreeMacTests: XCTestCase {
     private var window: NSWindow!
+
+    func testParagraphPublishesFinalTextAndRoleBeforeApplyReturns() throws {
+        let p = try fixture()
+        let setter = try XCTUnwrap(class_getInstanceMethod(NSView.self, #selector(NSView.setAccessibilityValue(_:))))
+        let recording = try XCTUnwrap(class_getInstanceMethod(NSView.self, #selector(NSView.recordingParagraphValue(_:))))
+        method_exchangeImplementations(setter, recording)
+        defer { method_exchangeImplementations(setter, recording); NSView.paragraphValueWrites = [] }
+        NSView.paragraphValueWrites = []
+        p.apply(wireBatch([
+            ["op": "create", "id": 20, "kind": "text", "props": ["testId": "batched-paragraph", "text": "Draft", "accessibilityRole": "heading", "accessibilityHeadingLevel": "2"]],
+            ["op": "props", "id": 20, "set": ["text": "Final heading", "accessibilityHeadingLevel": "3"]],
+            ["op": "children", "id": 1, "ids": [2, 3, 20]],
+        ]))
+        let node = try XCTUnwrap(p.views[20])
+        XCTAssertEqual(NSView.paragraphValueWrites, ["3"], "no intermediate paragraph value is published")
+        XCTAssertEqual(node.accessibilityRole()?.rawValue, "AXHeading")
+        XCTAssertEqual(node.accessibilityLabel(), "Final heading")
+        XCTAssertTrue(node.isAccessibilityElement())
+        XCTAssertFalse(node.textAccessibilityQueued)
+        XCTAssertTrue(p.pendingTextAccessibility.isEmpty)
+
+        NSView.paragraphValueWrites = []
+        p.apply(wireBatch([
+            ["op": "props", "id": 20, "clear": ["accessibilityRole", "accessibilityHeadingLevel", "text"]],
+            ["op": "paragraph", "id": 20, "runs": [["id": 21, "parent": 20, "paint": true, "props": ["text": "Final paragraph"]]]],
+        ]))
+        XCTAssertEqual(NSView.paragraphValueWrites, ["Final paragraph"])
+        XCTAssertEqual(node.accessibilityRole(), .staticText)
+        XCTAssertEqual(node.accessibilityLabel(), "Final paragraph")
+        XCTAssertEqual(node.accessibilityValue() as? String, "Final paragraph")
+
+        p.apply(wireBatch([["op": "props", "id": 20, "set": ["accessibilityRole": "status"]]]))
+        XCTAssertEqual(node.accessibilityRole(), .group)
+        XCTAssertEqual(node.accessibilitySubrole()?.rawValue, "AXApplicationStatus")
+        XCTAssertNil(node.accessibilityValue())
+    }
+
+    func testQueuedParagraphRemovalCannotWriteIntoAReplacementOrAnotherSession() throws {
+        let p = try fixture(), other = Presenter()
+        let setter = try XCTUnwrap(class_getInstanceMethod(NSView.self, #selector(NSView.setAccessibilityValue(_:))))
+        let recording = try XCTUnwrap(class_getInstanceMethod(NSView.self, #selector(NSView.recordingParagraphValue(_:))))
+        method_exchangeImplementations(setter, recording)
+        defer { method_exchangeImplementations(setter, recording); NSView.paragraphValueWrites = [] }
+        NSView.paragraphValueWrites = []
+        p.apply(wireBatch([
+            ["op": "create", "id": 20, "kind": "text", "props": ["text": "Removed", "testId": "batched-paragraph"]],
+            ["op": "destroy", "id": 20],
+            ["op": "create", "id": 20, "kind": "text", "props": ["text": "Replacement", "testId": "batched-paragraph"]],
+            ["op": "children", "id": 1, "ids": [2, 3, 20]],
+        ]))
+        XCTAssertEqual(NSView.paragraphValueWrites, ["Replacement"])
+        other.apply(wireBatch([["op": "create", "id": 20, "kind": "text", "props": ["text": "Other session"]]]))
+        XCTAssertEqual(other.views[20]?.accessibilityLabel(), "Other session")
+        XCTAssertEqual(p.views[20]?.accessibilityLabel(), "Replacement")
+        let node = try XCTUnwrap(p.views[20])
+        node.applyProps(set: ["text": "Immediate"], clear: [])
+        XCTAssertEqual(node.accessibilityValue() as? String, "Immediate", "a standalone update does not wait for a batch")
+        XCTAssertTrue(p.pendingTextAccessibility.isEmpty)
+        XCTAssertTrue(other.pendingTextAccessibility.isEmpty)
+    }
 
     func testToggleButtonsReportFalseTrueAndMixedFromThePlatform() throws {
         let p = try fixture()
@@ -591,6 +658,42 @@ final class AccessibilityTreeMacTests: XCTestCase {
         XCTAssertEqual([sound["role"] as? String, (sound["states"] as? [String: Any])?["checked"] as? Bool], ["switch", true] as [AnyHashable?])
     }
 
+    func testLegacyAttributeNamesFollowDirectPropsAndCrossSessionAncestry() throws {
+        let p = try fixture()
+        let node = try XCTUnwrap(p.views[2])
+        let baseline = node.accessibilityAttributeNames()
+        let invalid = NSAccessibility.Attribute(rawValue: "AXInvalid")
+        let popup = NSAccessibility.Attribute(rawValue: "AXPopupValue")
+        XCTAssertFalse(node.accessibilityAttributeNames().contains(invalid))
+        node.props["accessibilityInvalid"] = "grammar"
+        node.props["accessibilityHasPopup"] = "menu"
+        XCTAssertTrue(node.accessibilityAttributeNames().contains(invalid))
+        XCTAssertEqual(node.accessibilityAttributeValue(invalid) as? String, "grammar")
+        XCTAssertTrue(node.accessibilityAttributeNames().contains(popup))
+        node.props["accessibilityInvalid"] = "false"
+        node.props.removeValue(forKey: "accessibilityHasPopup")
+        XCTAssertFalse(node.accessibilityAttributeNames().contains(invalid))
+        XCTAssertFalse(node.accessibilityAttributeNames().contains(popup))
+
+        let outer = Presenter()
+        outer.apply(wireBatch([["op": "create", "id": 100, "kind": "view", "props": ["accessibilityDisabled": "true"]], ["op": "roots", "ids": [100]]]))
+        let parent = try XCTUnwrap(outer.views[100])
+        let uninitialized = NodeView(id: 101, kind: "view", presenter: outer)
+        parent.addSubview(uninitialized)
+        XCTAssertTrue(uninitialized.accessibilityAttributeNames().contains(.enabled))
+        XCTAssertEqual(uninitialized.accessibilityAttributeValue(.enabled) as? Bool, false)
+        parent.addSubview(p.viewport)
+        XCTAssertTrue(node.accessibilityAttributeNames().contains(.enabled))
+        XCTAssertEqual(node.accessibilityAttributeValue(.enabled) as? Bool, false)
+        parent.props["accessibilityDisabled"] = "false"
+        XCTAssertFalse(node.ariaUnavailable)
+        XCTAssertEqual(node.accessibilityAttributeNames(), baseline)
+        parent.props["accessibilityDisabled"] = "true"
+        node.props["accessibilityDisabled"] = "false"
+        XCTAssertFalse(node.ariaUnavailable, "a local false overrides another session's ancestor")
+        XCTAssertEqual(node.accessibilityAttributeNames(), baseline)
+    }
+
     func testFormStateWritesFollowPropsAndInheritedAvailability() throws {
         let p = try fixture()
         p.apply(wireBatch([
@@ -627,6 +730,49 @@ final class AccessibilityTreeMacTests: XCTestCase {
         p.apply(wireBatch([["op": "props", "id": 20, "set": ["accessibilityHint": "Again", "accessibilityRequired": "true"]]]))
         XCTAssertEqual(node.accessibilityHelp(), "Again")
         XCTAssertTrue(node.isAccessibilityRequired())
+    }
+
+    func testReparentedSubtreeRefreshesNativeAndAuthoredAvailability() throws {
+        let p = try fixture()
+        p.apply(wireBatch([
+            ["op": "create", "id": 20, "kind": "view"],
+            ["op": "create", "id": 21, "kind": "view", "props": ["accessibilityDisabled": "true"]],
+            ["op": "create", "id": 22, "kind": "view"],
+            ["op": "create", "id": 23, "kind": "view", "props": ["accessibilityRole": "button"]],
+            ["op": "create", "id": 24, "kind": "input"],
+            ["op": "create", "id": 25, "kind": "view", "props": ["accessibilityDisabled": "false"]],
+            ["op": "create", "id": 26, "kind": "view", "props": ["accessibilityRole": "button"]],
+            ["op": "children", "id": 25, "ids": [26]],
+            ["op": "children", "id": 20, "ids": [23, 24, 25]],
+            ["op": "children", "id": 1, "ids": [20, 21, 22]],
+        ]))
+        let button = try XCTUnwrap(p.views[23]), field = try XCTUnwrap(p.views[24]?.field)
+        let overridden = try XCTUnwrap(p.views[26])
+        XCTAssertTrue(button.isAccessibilityEnabled())
+        XCTAssertTrue(field.isAccessibilityEnabled())
+        p.apply(wireBatch([
+            ["op": "children", "id": 1, "ids": [21, 22]],
+            ["op": "children", "id": 21, "ids": [20]],
+        ]))
+        XCTAssertFalse(button.isAccessibilityEnabled())
+        XCTAssertFalse(field.isAccessibilityEnabled())
+        XCTAssertTrue(field.isEnabled, "ARIA availability does not disable input")
+        XCTAssertTrue(overridden.isAccessibilityEnabled(), "an explicit false ends inherited ARIA disabled")
+        p.apply(wireBatch([
+            ["op": "children", "id": 21, "ids": []],
+            ["op": "children", "id": 22, "ids": [20]],
+        ]))
+        XCTAssertTrue(button.isAccessibilityEnabled())
+        XCTAssertTrue(field.isAccessibilityEnabled())
+        p.apply(wireBatch([
+            ["op": "create", "id": 27, "kind": "view"],
+            ["op": "children", "id": 22, "ids": []],
+            ["op": "children", "id": 21, "ids": [27]],
+            ["op": "children", "id": 27, "ids": [20]],
+        ]))
+        XCTAssertFalse(button.isAccessibilityEnabled(), "a new parent still refreshes an existing subtree")
+        XCTAssertFalse(field.isAccessibilityEnabled())
+        XCTAssertTrue(overridden.isAccessibilityEnabled())
     }
 
     /// Onboarding F22, spreadsheet F20: a field's `aria-describedby` text is

@@ -41,6 +41,10 @@ struct CssAnimation {
     let duration: Double, repeatCount: Double, fill: Int, start: Double, delay: Double
     /// The local time an authored pause holds it at, in seconds.
     let held: Double?
+    /// Added to the layer's model value rather than replacing it (a played translate).
+    let additive: Bool
+    /// An additive translate's target (`[x, y, x%, y%]`), which its values are relative to.
+    let additiveTarget: [Double]?
 
     /// An SVG element's spec carries its reading under "#" (`SvgPrepare.spec`).
     init?(_ spec: [String: Any]) {
@@ -55,6 +59,8 @@ struct CssAnimation {
         duration = num(spec["d"]); repeatCount = num(spec["n"]); fill = Int(num(spec["fill"]))
         start = num(spec["s"]); delay = num(spec["dl"])
         held = (spec["h"] as? NSNumber)?.doubleValue
+        additive = (spec["a"] as? NSNumber)?.boolValue ?? false
+        additiveTarget = (spec["to"] as? [Any]).map { $0.map { num($0) } }
     }
 
     /// A list as an op or an element carries it: read, or dictionaries.

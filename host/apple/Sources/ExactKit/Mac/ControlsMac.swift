@@ -87,6 +87,12 @@ final class ControlHost: NSObject {
     private var faces: [UInt32: ButtonFace] = [:]
     func face(_ id: UInt32) -> ButtonFace {
         if let face = faces[id] { return face }
+        if let many = presenter.buttonFaces {
+            var ids = [id]
+            for (other, kind) in kinds where kind == "button" && other != id && faces[other] == nil && controls[other] != nil { ids.append(other) }
+            for (other, face) in zip(ids, many(ids)) { faces[other] = face }
+            return faces[id] ?? ButtonFace()
+        }
         let face = presenter.buttonFace?(id) ?? ButtonFace()
         faces[id] = face
         return face

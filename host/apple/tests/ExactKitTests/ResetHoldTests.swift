@@ -16,6 +16,22 @@ import ExactCore
 /// event-tracking mode, or drain the main queue, this fails, and knownLoss's losses become real. Each probe must run
 /// after the restart, so none passes by never running.
 final class ResetHoldTests: XCTestCase {
+    func testHeldInputsDoNotEnterTheDeferredQueue() {
+        let session = ExactApp.shared.makeSession(label: "reset-held-input")
+        defer { session.destroy() }
+        var notified = 0
+        session.runtime.onDeferred = { notified += 1 }
+        session.runtime.held = true
+        _ = session.runtime.fieldEvent(1, 54, "old field", now: 0)
+        XCTAssertTrue(session.runtime.deferred.isEmpty)
+        XCTAssertEqual(notified, 0)
+        XCTAssertEqual(session.runtime.takeHeldCalls(), ["later(_:_:_:now:)"])
+        session.runtime.held = false
+        _ = session.runtime.fieldEvent(2, 54, "new field", now: 0)
+        XCTAssertEqual(session.runtime.takeDeferred().map(\.view), [2])
+        XCTAssertEqual(notified, 1)
+    }
+
     private static let probes = ["commonPerform", "commonTimer", "mainQueue"]
 
     /// Queues the three probes; each records its name and whether a runtime was held when it ran.

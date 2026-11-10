@@ -38,7 +38,7 @@ final class MenuHost: NSObject {
         var placement = PositionArea.History()
         /// The region its option sized it in, as the kernel was told it (`PositionArea.place`).
         var block: HostBlock?
-        let layer = PopoverLayer(frame: .zero)
+        var layer = PopoverLayer(frame: .zero)  // Reuse the host's empty layer when available.
         var menu: NSMenu?
         /// AppKit's popover, while one shows it (PopoversMac.swift).
         var native: NativePopover?
@@ -62,6 +62,8 @@ final class MenuHost: NSObject {
     /// Painted in the page's top layer, not AppKit's popover: the driver's
     /// own chrome, and a test of that presentation.
     var painted = ExactEnv.authoredChrome
+    let keptLayers = NSMapTable<NSView, PopoverLayer>(keyOptions: .weakMemory, valueOptions: .strongMemory)
+
     /// Popovers AppKit is still taking away (PopoversMac.swift).
     var leaving: [NativePopover] = []
     /// The click with which AppKit closed an invoker's own popover.
@@ -220,13 +222,49 @@ final class MenuHost: NSObject {
         guard let view = window.firstResponder as? NSView else { return nil }
         return (view as? NSTextView).flatMap { $0.isFieldEditor ? $0.delegate as? NSView : nil } ?? view
     }
-    func refresh() {
+    static func nodes(under root: NSView, into out: inout [NodeView]) {
+        if let node = root as? NodeView { out.append(node) }
+        for child in root.subviews { nodes(under: child, into: &out) }
+    }
+    func refresh(_ scope: NodeView? = nil) {
+        refresh(scopes: scope.map { [$0] })
+    }
+    private func refresh(scopes: [NodeView]?) {
         guard let presenter else { return }
-        presenter.navigation.refreshInputGates(Array(presenter.views.values))
-        presenter.topLayerChanged()
-        presenter.syncKeyViewLoop()
-        presenter.syncAccessibility()
-        presenter.shortcuts.sync()
+        var accessibilityChanges: Set<UInt32>?
+        if let scopes {
+            var nodes: [NodeView] = []
+            for root in scopes where presenter.views[root.id] === root { MenuHost.nodes(under: root, into: &nodes) }
+            presenter.navigation.refreshInputGates(nodes)
+            var changed = Set(nodes.map(\.id))
+            // Ancestor names can read this subtree; syncAccessibility also follows external references.
+            for root in scopes where presenter.views[root.id] === root {
+                for ancestor in presenter.logicalAncestry(of: root) {
+                    if let node = ancestor as? NodeView { changed.insert(node.id) }
+                }
+            }
+            accessibilityChanges = changed
+        } else {
+            presenter.navigation.refreshInputGates(Array(presenter.views.values))
+        }
+        // A popover's show or hide is one subtree's change, as a batch is: the
+        // visible text rebuild coalesces to the turn's end, the key-view loop is
+        // marked stale and rebuilt on the next Tab rather than walked now, and
+        // the shortcut faces are refetched only over the changed subtree, not
+        // every mounted button. A dialog's whole-window refresh
+        // (`scopes == nil`) keeps the eager passes.
+        if let changed = accessibilityChanges {
+            presenter.topLayerChangedDeferred()
+            presenter.keyViewLoopStale = true
+            presenter.syncAccessibility(changed: changed)
+            presenter.shortcuts.freshViews = changed // sync() reads it and resets it to nil
+            presenter.shortcuts.sync()
+        } else {
+            presenter.topLayerChanged()
+            presenter.syncKeyViewLoop()
+            presenter.syncAccessibility(changed: accessibilityChanges)
+            presenter.shortcuts.sync()
+        }
     }
     /// The popover `source` shows, hides or toggles, as HTML resolves it
     /// (`Invocation`); nil for a dialog's commands, which `DialogHost` runs.
@@ -373,7 +411,7 @@ final class MenuHost: NSObject {
                 if let owner = entry.confirmation { DispatchQueue.main.async { owner.finished = true } }
             }
         } else if windowed, let source, present(entry, from: source, in: window) {
-            refresh()
+            refresh(pop)
         } else {
             paint(entry, in: window)
             layout()
@@ -382,7 +420,7 @@ final class MenuHost: NSObject {
                 contains(pop, $0) && $0.props["autofocus"] == "true" && !$0.inert
                     && !$0.disabled && !$0.isHiddenOrHasHiddenAncestor
             }) { window.makeFirstResponder(presenter.keyView(of: target)) }
-            refresh()
+            refresh(pop)
         }
     }
     /// LLP 1021 §5.1: a context menu, its popover's menu rows as an NSMenu
@@ -482,7 +520,10 @@ final class MenuHost: NSObject {
         // Reset, unmount, a changed row: the menu ends and nothing it showed dispatches.
         if cancelling { entry.confirmation?.cancel() }
         entry.menu?.cancelTracking()
-        pop.isHidden = pop.props["popover"] != nil || pop.style["display"]?.string == "none"
+        // The focus goes back before the popover hides. Hidden first, AppKit
+        // takes the first responder out of the hidden subtree itself and searches the whole window for the next
+        // key view, which is then replaced by the trigger.
+
         // The focus is given back to the trigger, never left on the window
         // the hidden popover leaves; VoiceOver is sent to it after
         // (`tellLanding`, Accessibility.swift).
@@ -494,17 +535,20 @@ final class MenuHost: NSObject {
                 if let range = entry.selection, let editor = window.firstResponder as? NSTextView { editor.setSelectedRange(range) }
             } else { window.makeFirstResponder(presenter?.viewport) }
         }
+        pop.isHidden = pop.props["popover"] != nil || pop.style["display"]?.string == "none"
         if let native = entry.native {
             dismiss(native)
-            refresh()
+            refresh(pop)
         } else if entry.menu == nil {
             restore(entry)
-            refresh()
+            refresh(pop)
         }
     }
     func reset() {
         while let last = entries.last { close(last.popover, restoreFocus: false) }
         for old in leaving { old.finish() }
+        for layer in keptLayers.objectEnumerator()?.allObjects as? [PopoverLayer] ?? [] { layer.removeFromSuperview() }
+        keptLayers.removeAllObjects()
         choosing.forEach { $0.cancel() }; choosing.removeAll()
         picking.forEach { $0.cancelled = true }; picking.removeAll()
         popovers.removeAll(); presentations.removeAll()
@@ -525,6 +569,14 @@ final class MenuHost: NSObject {
         layout()
         return true
     }
+    /// A new popover is closed before it joins the page, so the batch's
+    /// ordinary input and accessibility pass sees its final visibility.
+    func created(_ node: NodeView) {
+        guard node.props["popover"] != nil else { return }
+        popovers[node.id] = node
+        node.isHidden = true
+    }
+
     func rejectActiveMenuProperties(in pop: NodeView) {
         for case let row as NodeView in pop.container.subviews where row.isButton && row.props["popover"] == nil && row.props["contextPreview"] != "true" {
             row.rejectNativeActiveProperties(on: "NSMenuItem")
@@ -555,19 +607,21 @@ final class MenuHost: NSObject {
             entry.native?.repoint()
         }
         revalidate()
-        var changed = false
+        var changed: [NodeView] = []
         let current = presenter.carrying("popover")
         for pop in popovers.values where live(pop) && pop.props["popover"] == nil {
             let hidden = pop.style["display"]?.string == "none" || pop.routeInert
                 || (pop.props["semanticTag"] == "dialog" && !presenter.dialogs.owns(pop))
-            if pop.isHidden != hidden { pop.isHidden = hidden; changed = true }
+            if pop.isHidden != hidden { pop.isHidden = hidden; changed.append(pop) }
         }
         popovers = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
         for pop in current {
             let hidden = !owns(pop) || pop.style["display"]?.string == "none"
-            if pop.isHidden != hidden { pop.isHidden = hidden; changed = true }
+            if pop.isHidden != hidden { pop.isHidden = hidden; changed.append(pop) }
         }
-        if changed { refresh() }
+        if !changed.isEmpty {
+            refresh(scopes: changed)
+        }
         layout()
     }
     func layout() {

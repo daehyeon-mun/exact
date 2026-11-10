@@ -242,6 +242,42 @@ extension NodeView {
         let inner = focusInside(event)
         if takesClickFocus, !inner, !keepsFocus { window?.makeFirstResponder(self) }
         if pressable { pressed = true } else { (chain?.responder(from: self, event: event) ?? (chain == nil ? nextResponder : nil))?.mouseDown(with: event) }
+        if event.type == .leftMouseDown, let presenter, presenter.menuDownPress?.click != event.eventNumber,
+            let button = menuButton(presenter)
+        {
+            presenter.menuDownPress = (button.id, event.eventNumber)
+            let canvas = button.inputCanvas, ownerWindow = button.window
+            presenter.menus.activating(from: button, pressing: button) {
+                presenter.press(button.id, held: KeyCodes.held(event.modifierFlags), click: event)
+            }
+            button.finishPress(canvas: canvas, window: ownerWindow, pointer: true)
+        }
+    }
+
+    /// This view or the nearest enabled button above it that puts up a menu.
+    func menuButton(_ presenter: Presenter) -> NodeView? {
+        var at: NSView? = self, steps = 0
+        while let view = at, steps < 12 {
+            if let node = view as? NodeView, node.isButton {
+                guard !node.disabled, !node.inert, let invocation = presenter.invocation(of: node), invocation.opensPopover,
+                    node.props["accessibilityRole"] == "combobox" || NodeView.putsUpMenu(invocation.target)
+                else { return nil }
+                return node
+            }
+            at = presenter.presentationParent(of: view) ?? view.superview; steps += 1
+        }
+        return nil
+    }
+    /// A popover that is a menu: its role, its rows' roles, or its shape.
+    static func putsUpMenu(_ pop: NodeView) -> Bool {
+        if ["menu", "listbox"].contains(pop.props["accessibilityRole"] ?? "") { return true }
+        var queue: [NodeView] = [pop], seen = 0
+        while !queue.isEmpty, seen < 64 {
+            let node = queue.removeFirst(); seen += 1
+            if ["menuitem", "menuitemradio", "menuitemcheckbox", "option"].contains(node.props["accessibilityRole"] ?? "") { return true }
+            queue += node.container.subviews.compactMap { $0 as? NodeView }
+        }
+        return pop.menuShaped
     }
     /// A descendant that took focus keeps it (LLP 1088 D7.3): the click is in it.
     func focusInside(_ event: NSEvent) -> Bool {

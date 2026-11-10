@@ -142,3 +142,50 @@ extension Agent {
     }
 }
 #endif
+
+#if os(macOS)
+import AppKit
+
+/// A view's subtree as pixels (LLP 1014 D3).
+package enum Capture {
+    /// A capture is drawing: its draws are not repaints (D4 b).
+    nonisolated(unsafe) static var capturing = false
+    /// Guest pictures for this turn, by the node that draws each (two
+    /// sessions' ids can be the same); the remote platform views are hidden
+    /// while their owning nodes draw these (@ref LLP 1020 D4/D6, `withGuests`).
+    nonisolated(unsafe) static var web: [ObjectIdentifier: ExactWebImage] = [:]
+
+    /// The subtree painted at `scale`: premultiplied RGBA, rows top-down,
+    /// `pixelsWide * 4` bytes per row, transparent where nothing painted.
+    package static func bitmap(of view: NSView, scale: CGFloat, prepared: Bool = false) -> NSBitmapImageRep? {
+        if !prepared { prepareBackingLayers(of: view) }
+        // A subtree painted through its canvas composites at alpha 0; paint
+        // it opaque into the bitmap regardless.
+        let alpha = view.alphaValue
+        view.alphaValue = 1
+        // A canvas nested under this one that is painted through its own
+        // surface: its picture comes by readback (its draw), not from its
+        // overlay's views, so those are hidden for the duration.
+        var hidden: [NSView] = []
+        func hide(_ v: NSView) {
+            for s in v.subviews {
+                if let n = s as? NodeView, n.placement != nil, !n.isHidden { n.isHidden = true; hidden.append(n); continue }
+                if let n = s as? NodeView, let o = n.overlay, o.alphaValue == 0, !o.isHidden { o.isHidden = true; hidden.append(o); continue }
+                hide(s)
+            }
+        }
+        hide(view)
+        let rep = paintOrderBitmap(of: view, scale: scale, prepared: true)
+        for o in hidden { o.isHidden = false }
+        view.alphaValue = alpha
+        return rep
+    }
+}
+
+extension NSRect {
+    /// The rect inside the given edges (never negative in size).
+    func insetBy(left: CGFloat, top: CGFloat, right: CGFloat, bottom: CGFloat) -> NSRect {
+        NSRect(x: minX + left, y: minY + top, width: max(0, width - left - right), height: max(0, height - top - bottom))
+    }
+}
+#endif

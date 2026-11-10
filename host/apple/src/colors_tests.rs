@@ -269,10 +269,8 @@ fn the_dynamic_range_limit_reaches_a_box_below_the_node_that_sets_it() {
     );
 }
 
-/// LLP 1034 §8: `color-scheme` reaches every native view below the node
-/// that sets it (UIKit and AppKit inherit it too, but a popover or dialog the
-/// host lifts out of its ancestor would not), a change restyles them, and a
-/// box outside it carries nothing.
+/// The authored scheme crosses to the presenter. AppKit inherits it below;
+/// other hosts receive it on each descendant. An unrelated box carries none.
 #[test]
 fn the_color_scheme_reaches_every_view_below_the_node_that_sets_it() {
     let (mut host, boot) = boot(
@@ -290,7 +288,17 @@ fn the_color_scheme_reaches_every_view_below_the_node_that_sets_it() {
         view(&host, "outside"),
     );
     assert_eq!(style(&boot, sheet).unwrap()["color_scheme"], "dark");
-    assert_eq!(style(&boot, leaf).unwrap()["color_scheme"], "dark");
+    let inherited = |scheme: &str| {
+        if cfg!(target_os = "macos") {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(scheme)
+        }
+    };
+    assert_eq!(
+        style(&boot, leaf).unwrap()["color_scheme"],
+        inherited("dark")
+    );
     let plain = style(&boot, outside).unwrap();
     assert!(plain.get("color_scheme").is_none(), "{plain}");
     let batch = host.dispatch(view(&host, "flip"), exact_runner::Event::Press);
@@ -299,11 +307,18 @@ fn the_color_scheme_reaches_every_view_below_the_node_that_sets_it() {
         "light",
         "{batch}"
     );
-    assert_eq!(
-        style(&batch, leaf).expect("the leaf restyled")["color_scheme"],
-        "light",
-        "{batch}"
-    );
+    if cfg!(target_os = "macos") {
+        assert!(
+            style(&batch, leaf).is_none(),
+            "AppKit inherits without a redundant style: {batch}"
+        );
+    } else {
+        assert_eq!(
+            style(&batch, leaf).expect("the leaf restyled")["color_scheme"],
+            "light",
+            "{batch}"
+        );
+    }
 }
 
 #[test]

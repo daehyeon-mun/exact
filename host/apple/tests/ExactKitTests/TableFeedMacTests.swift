@@ -129,6 +129,12 @@ final class TableFixture {
             RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.002))
         }
         window.layoutIfNeeded()
+        // A list's report goes to the owner without main waiting, and its landing can send the next (rows measured
+        // as they mount): drain until none is in flight.
+        for _ in 0..<16 where session.ownerInFlight {
+            session.drainFill()
+            window.layoutIfNeeded()
+        }
     }
     func node(_ id: String) throws -> NodeView { try XCTUnwrap(presenter.views.values.first { $0.props["testId"] == id }, id) }
     func scroll(to y: CGFloat) {

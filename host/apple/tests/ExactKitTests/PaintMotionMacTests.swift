@@ -7,6 +7,32 @@ import XCTest
 /// paragraph is told it inherits; a view whose own appearance differs from
 /// the session's is noted for the host, once, until it agrees again.
 final class PaintMotionMacTests: XCTestCase {
+    func testAdditiveTranslationInstallsItsTargetBeforeTheAnimation() throws {
+        _ = NSApplication.shared
+        let p = Presenter()
+        p.apply(wireBatch([
+            ["op": "create", "id": 1, "kind": "view"],
+            ["op": "roots", "ids": [1]],
+            ["op": "frame", "id": 1, "x": 0.0, "y": 0.0, "w": 100.0, "h": 40.0],
+            ["op": "animations", "id": 1, "specs": [[
+                "id": "translate-x", "k": "transform.translation.x", "s": 0.0, "dl": 0.0, "d": 1.0, "n": 1,
+                "t": [0.0, 1.0], "v": [-50.0, 0.0], "c": [], "fill": 3,
+                "a": 1, "to": [0.0, 10.0, 50.0, 0.0],
+            ]]],
+        ]))
+        let view = try XCTUnwrap(p.views[1]), layer = try XCTUnwrap(view.layer)
+        XCTAssertEqual(view.translatePx, CGPoint(x: 0, y: 10))
+        XCTAssertEqual(view.translatePercent, CGPoint(x: 50, y: 0))
+        XCTAssertEqual(layer.transform.m41, 50, accuracy: 0.001)
+        XCTAssertEqual(layer.transform.m42, 10, accuracy: 0.001)
+        let animation = try XCTUnwrap(layer.animationKeys()?.compactMap { layer.animation(forKey: $0) as? CAKeyframeAnimation }.first)
+        XCTAssertTrue(animation.isAdditive)
+        XCTAssertEqual(animation.values as? [Double], [-50, 0])
+        XCTAssertEqual(layer.transform.m41 + (animation.values?.first as? Double ?? .nan), 0,
+                       "the first animated value starts at the old position")
+        p.reset()
+    }
+
     private static let appearancePlan: Result<Data, Error> = Result {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -50,12 +76,18 @@ final class PaintMotionMacTests: XCTestCase {
     func testMountingAnAuthoredSchemeSkipsUnchangedAppearancePasses() throws {
         let session = try appearanceSession("appearance-mount")
         defer { session.destroy() }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 390, height: 400),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = session.presenter.viewport
+        defer { window.close() }
         let reveal = try XCTUnwrap(session.presenter.views.values.first { $0.props["testId"] == "appearance-reveal" })
         let before = session.appliedBatches
         session.apply(session.runtime.press(reveal.id, now: session.now()))
         let rows = session.presenter.views.values.filter { $0.props["testId"]?.hasPrefix("appearance-row-") == true }
         XCTAssertEqual(rows.count, 8, "the runner mounted the authored rows")
-        XCTAssertTrue(rows.allSatisfy { $0.drawsDark && session.viewDark[$0.id] == true })
+        XCTAssertTrue(rows.allSatisfy { $0.drawsDark }, "every native child inherits the authored appearance")
+        XCTAssertTrue(rows.allSatisfy { $0.style["color_scheme"] == nil }, "no per-child appearance override is needed")
         XCTAssertTrue(rows.allSatisfy { $0.channels("text_color") == [255, 255, 255, 255] })
         XCTAssertEqual(session.appliedBatches, before + 1, "only the reveal applies; its unchanged appearance reports skip their passes")
     }

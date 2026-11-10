@@ -105,8 +105,15 @@ extension MenuHost {
     }
 
     func paint(_ entry: Entry, in window: NSWindow) {
+        let host = layerHost(entry, in: window)
+        // An empty top layer kept in its host from an earlier popover is used again, in place.
+        if let host, let kept = keptLayers.object(forKey: host), kept.superview === host, kept.subviews.isEmpty,
+            !entries.contains(where: { $0 !== entry && $0.layer === kept })
+        {
+            entry.layer = kept
+        }
         entry.layer.autoresizingMask = [.width, .height]
-        layerHost(entry, in: window)?.addSubview(entry.layer)
+        if !(entry.layer.superview === host && host?.subviews.last === entry.layer) { host?.addSubview(entry.layer) }
         entry.layer.setPaintForeground()
         entry.layer.addSubview(entry.popover)
         entry.popover.isHidden = false
@@ -125,7 +132,14 @@ extension MenuHost {
     func restore(_ entry: Entry) {
         let pop = entry.popover
         pop.removeFromSuperview()
-        entry.layer.removeFromSuperview()
+        // An emptied top layer stays where it is, transparent and passing every hit through, so taking
+        // the popover away changes the popover's own area only, not the whole window's.
+        if let host = entry.layer.superview, entry.layer.subviews.isEmpty, !(host is PopoverLayer) {
+            if let old = keptLayers.object(forKey: host), old !== entry.layer { old.removeFromSuperview() }
+            keptLayers.setObject(entry.layer, forKey: host)
+        } else {
+            entry.layer.removeFromSuperview()
+        }
         if live(pop), let parent = entry.parent {
             let siblings = parent.subviews
             if entry.index < siblings.count { parent.addSubview(pop, positioned: .below, relativeTo: siblings[entry.index]) }

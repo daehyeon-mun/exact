@@ -603,6 +603,8 @@ uint32_t exact_share_land(ExactRuntime rt);
  * A change's text, key's name, or guest message is the payload in the input
  * buffer's first len bytes. */
 uint32_t exact_dispatch(ExactRuntime rt, uint32_t view, uint32_t kind, size_t len, double now_ms);
+/* a list of events (view, kind, flags, length, payload), one commit. */
+uint32_t exact_dispatch_many(ExactRuntime rt, size_t len, double now_ms);
 /* A scroll container the presenter shows (or, nonzero page, the page) now
  * stands at left, top CSS px (scrollLeft, scrollTop), handler or not: what
  * frame() and measure() subtract from the kernel's scroll-free box, so an
@@ -910,6 +912,7 @@ uint32_t exact_scheme(ExactRuntime rt, uint32_t dark);
  * differs from the session's: its node's light-dark() colours resolve by it
  * (LLP 1062). */
 uint32_t exact_view_scheme(ExactRuntime rt, uint32_t view, uint32_t dark);
+uint32_t exact_view_schemes(ExactRuntime rt, size_t len);
 /** LLP 1095 D1: every colour reference the presenter should resolve, as JSON
  *  `[[kind, id, "name"], …]` in the output buffer; returns its length. */
 uint32_t exact_color_references(ExactRuntime rt);

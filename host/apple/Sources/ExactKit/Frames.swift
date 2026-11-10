@@ -160,6 +160,31 @@ package final class Frames: NSObject {
     /// Inside `tick`: work it applies can end motion, but the callback is recorded before the run ends.
     private var ticking = false
 
+    /// After a batch that is not a tick's restyles a node while motion
+    /// runs, the motion tick for the next frame its commit can still reach runs now, not at that frame's callback. A
+    /// transition the batch began then reaches Core Animation in the batch's own commit and starts at that frame
+    /// (LLP 1003.001 D2's frame, one callback sooner). The frame's own callback later repeats the tick, which starts
+    /// nothing new (`present_frame` is idempotent at the same frame).
+
+    /// Margin before the frame's target that the commit and the render server need (4 ms).
+    static let motionCommitMargin = 0.004
+    private var motionCommitTarget: CFTimeInterval = 0
+    func scheduleMotionCommit() {
+        #if os(macOS)
+        guard !ticking, let link, let s = session, s.clock == nil, !s.fillInFlight else { return }
+        let period = link.targetTimestamp - link.timestamp
+        guard period > 0.001 else { return }
+        var target = link.targetTimestamp
+        let now = CACurrentMediaTime()
+        while target < now + Self.motionCommitMargin { target += period }
+        guard abs(target - motionCommitTarget) > period / 2 else { return }
+        motionCommitTarget = target
+        ticking = true
+        submitMotionTick(now: s.now(), frame: (target - ExactEnv.t0) * 1000)
+        ticking = false
+        #endif
+    }
+
     func run(_ wanted: Bool) {
         if wanted, session?.clock != nil { requestCanvas() }
         let on = (wanted || hatches) && session?.clock == nil
@@ -198,3 +223,11 @@ package final class Frames: NSObject {
         #endif
     }
 }
+
+#if os(macOS)
+/// The display link's Objective-C target: `Presenter` is not an `NSObject`.
+final class PumpTarget: NSObject {
+    var fire: ((TimeInterval) -> Void)?
+    @objc func tick(_ link: CADisplayLink) { fire?(link.targetTimestamp - link.timestamp) }
+}
+#endif

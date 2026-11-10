@@ -295,6 +295,8 @@ package final class TextSelection {
         anchorIndex = 0; focusIndex = 0
         dragged = false
         list = nil; logicalAnchor = nil; logicalFocus = nil; allListText = false
+        // Gesture cancellation still runs when no pixels or selectionchange state need clearing.
+        guard !painted.isEmpty || !reported.isEmpty else { return }
         invalidate()
     }
 

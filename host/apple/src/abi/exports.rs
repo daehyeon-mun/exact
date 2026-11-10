@@ -352,7 +352,6 @@ macro_rules! host {
         #[no_mangle]
         pub extern "C" fn exact_delivery_api() -> *const $crate::delivery::Api { $api }
 
-
         /// Refresh this session's delivery facts; the batch's length.
         #[no_mangle]
         pub extern "C" fn exact_delivery_sync(rt: u32) -> u32 {
@@ -493,6 +492,13 @@ macro_rules! host {
         #[no_mangle]
         pub extern "C" fn exact_dispatch(rt: u32, view: u32, kind: u32, len: usize, now_ms: f64) -> u32 {
             $crate::abi::with_runtime(&EXACT_RUNTIMES, rt, false, |b, _| b.dispatch(view, kind, len, now_ms), |n| n)
+        }
+
+        /// The input buffer's event list, dispatched in
+        /// order and committed once (`Bridge::dispatch_many`).
+        #[no_mangle]
+        pub extern "C" fn exact_dispatch_many(rt: u32, len: usize, now_ms: f64) -> u32 {
+            $crate::abi::with_runtime(&EXACT_RUNTIMES, rt, false, |b, _| b.dispatch_many(len, now_ms), |n| n)
         }
 
         /// A scroller (or, nonzero `page`, the page) now stands at `left`,
@@ -995,6 +1001,13 @@ macro_rules! host {
         #[no_mangle]
         pub extern "C" fn exact_scheme(rt: u32, dark: u32) -> u32 {
             $crate::abi::with_runtime(&EXACT_RUNTIMES, rt, false, |b, _| b.scheme(dark != 0), |n| n)
+        }
+
+        /// Several views' appearances: LE (u32 view, u32
+        /// dark) records in the input buffer's first `len` bytes; one batch.
+        #[no_mangle]
+        pub extern "C" fn exact_view_schemes(rt: u32, len: usize) -> u32 {
+            $crate::abi::with_runtime(&EXACT_RUNTIMES, rt, false, |b, _| b.view_schemes(len), |n| n)
         }
 
         /// One view's appearance (nonzero: dark), where it differs from the

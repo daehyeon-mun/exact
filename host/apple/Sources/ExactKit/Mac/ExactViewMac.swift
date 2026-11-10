@@ -160,7 +160,14 @@ public final class ExactView: NSView {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 MainActor.assumeIsolated {
                     guard let self, note.object == nil || note.object as AnyObject? === self.window || note.object is NSApplication else { return }
-                    self.session.tellPreferences()
+                    var suppression = false
+                    if #available(macOS 26, *) {
+                        suppression = note.name == .NSApplicationShouldBeginSuppressingHighDynamicRangeContent
+                            || note.name == .NSApplicationShouldEndSuppressingHighDynamicRangeContent
+                    }
+                    // Preferences read potential HDR headroom, not temporary
+                    // suppression. Its notices change neither media nor colours.
+                    if !suppression { self.session.tellPreferences(skippingUnchanged: true) }
                     self.session.rasters.displayChanged()
                     // The title bar leaves the window in full screen and comes back after it.
                     if note.name == NSWindow.didEnterFullScreenNotification || note.name == NSWindow.didExitFullScreenNotification { self.syncInsets() }
@@ -379,7 +386,7 @@ public final class ExactView: NSView {
                     if self.session.presenter.pressEditorFirst(event) { return nil }
                     return event
                 }
-                if event.type == .keyDown { self.session.presenter.flushKeyViewLoop() }
+                if event.type == .keyDown, event.keyCode == 48 { self.session.presenter.flushKeyViewLoop() }
                 let focused = self.ownsShortcutFocus(in: event.window)
                 let code=KeyCodes.mac[Int(event.keyCode)] ?? "Unidentified"
                 if focused, event.modifierFlags.intersection([.command,.control]).isEmpty,
@@ -446,9 +453,14 @@ public final class ExactView: NSView {
     }
 
     /// Paint motion resolves `light-dark()` by this view's appearance (LLP 1062).
+    private var measuredAppearance: NSAppearance.Name?
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        session.controlTextChanged()
+        // Control fonts do not depend on light or dark, so a change between an
+        // appearance's light and dark variants measures nothing again; any other change (contrast, a vibrant
+        // variant) still does.
+        let measuring = AppearanceMetrics.measuringAppearance(effectiveAppearance)
+        if measuring != measuredAppearance { measuredAppearance = measuring; session.controlTextChanged() }
         session.scheme(dark: effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua)
         // The window's bar resolved its inks, tints and painted faces by the old appearance, and a
         // `light-dark()` pair puts no op on the wire when the scheme turns.

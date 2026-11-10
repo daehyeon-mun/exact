@@ -229,15 +229,45 @@ final class NavigationHost {
     /// from (`Presenter.tabStart`). `aria-hidden` takes a node out of the
     /// accessibility tree only, and the focus stays, as in Chrome.
     func refreshInputGates(_ nodes: [NodeView]) {
+        refreshInputGatesOnce(nodes)
+    }
+}
+
+extension NavigationHost {
+    /// `refreshInputGates` with the responder's ancestors read once per call (a node holds the focus when it
+    /// is one of them) and the accessibility-hidden flag written only when it changes.
+    func refreshInputGatesOnce(_ nodes: [NodeView]) {
+        // The ancestor walks' answers, shared by every node of the call (as a hit test shares them).
+        let ownMemo = NodeView.hitInert == nil
+        if ownMemo { NodeView.hitInert = [:] }
+        defer { if ownMemo { NodeView.hitInert = nil } }
+        var ariaHidden: [ObjectIdentifier: Bool] = [:]
+        func hiddenByProp(_ view: NSView) -> Bool {
+            if let known = ariaHidden[ObjectIdentifier(view)] { return known }
+            let own = (view as? NodeView)?.props["accessibilityElementsHidden"] == "true"
+            let up = presenter.authoredSuperview(of: view) ?? view.superview
+            let answer = own || (up.map(hiddenByProp) ?? false)
+            ariaHidden[ObjectIdentifier(view)] = answer
+            return answer
+        }
+        var holders = Set<ObjectIdentifier>()
+        var window: NSWindow?
+        var responder: NSView?
         for node in nodes {
             let inert = node.inert
-            let unreachable = inert || node.isHiddenOrHasHiddenAncestor
-            // Read before a field is disabled below, which can end its editing.
-            let window = node.window, responder = window?.firstResponder as? NSView
-            let focused = responder.map { $0 === node || $0.isDescendant(of: node) || node.field?.currentEditor() === $0 } ?? false
-            // The AX getter can traverse the legacy unsupported-attribute path
-            // for non-elements; writing this property is cheaper than querying it.
-            node.setAccessibilityHidden(node.accessibilityInert || node.isHiddenOrHasHiddenAncestor || node.accessibilityHiddenByProp)
+            let hidden = node.isHiddenOrHasHiddenAncestor
+            let unreachable = inert || hidden
+            if window == nil, let w = node.window {
+                window = w
+                responder = w.firstResponder as? NSView
+                var v = responder
+                while let at = v { holders.insert(ObjectIdentifier(at)); v = at.superview }
+            }
+            let focused = node.window != nil && holders.contains(ObjectIdentifier(node))
+            let axHidden = node.accessibilityInert || hidden || hiddenByProp(node)
+            // Compared with the last write by anyone (`accessibilityHiddenWritten`), so another projection's write is
+            // corrected too.
+            if node.accessibilityHiddenWritten != axHidden { node.setAccessibilityHidden(axHidden) }
             let enabled = !node.disabled && !inert
             if let field = node.field, field.isEnabled != enabled { field.isEnabled = enabled }
             let editable = enabled && node.props["editable"] != "false"
@@ -247,7 +277,6 @@ final class NavigationHost {
                 presenter.tabStart = presenter.keyView(of: node)
                 presenter.keyViewLoopStale = true
             }
-            // A field that was disabled may have ended its editing already.
             if window.firstResponder === responder { window.makeFirstResponder(nil) }
         }
     }

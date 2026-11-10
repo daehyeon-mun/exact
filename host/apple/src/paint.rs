@@ -104,6 +104,32 @@ impl<D: DataSource> Host<D> {
     /// report for a view corrects what was presented without motion, as the
     /// session's first does; a later change transitions, and so does a view
     /// that agrees with the session again.
+    /// [`Host::set_view_scheme`] for several views: one presentation and one batch.
+    pub fn set_view_schemes(&mut self, views: &[(ViewId, bool)]) -> String {
+        let mut batch = Batch::new();
+        let mut any = false;
+        for &(view, dark) in views {
+            let key = self.runner.kernel().node(view).map(|n| n.key);
+            if let Some(key) = key {
+                if let Some(retired) = self.paint.motion.set_view_scheme(
+                    self.runner.kernel(),
+                    &mut self.engine,
+                    key,
+                    dark,
+                    self.now_ms / 1000.0,
+                ) {
+                    self.retire_paint(retired, &mut batch);
+                    any = true;
+                }
+            }
+        }
+        if any {
+            self.present(&mut batch, false);
+        }
+        self.finish(batch, None)
+    }
+
+    /// One view's own appearance (LLP 1062 D4).
     pub fn set_view_scheme(&mut self, view: ViewId, dark: bool) -> String {
         let mut batch = Batch::new();
         let key = self.runner.kernel().node(view).map(|n| n.key);

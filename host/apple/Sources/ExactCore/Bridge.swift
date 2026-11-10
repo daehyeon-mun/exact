@@ -24,6 +24,9 @@ public struct Batch {
     public let busy: Bool
     /// Held over a restart's reset (`Runtime.held`): reached no runtime, and nothing applies it.
     public var held = false
+    /// The echoed key this batch answers (0: none); the session rolls the echo back if it was
+    /// prevented.
+    public var passiveEcho = 0
     /// @ref LLP 1043.000 §3 D8 — absolute runner deadline, absent without timers.
     public var timerDueMs: Double? = nil
     /// A data module's timer continuation an advance released is still out: the agent's jump waits for it.
@@ -383,15 +386,15 @@ package final class Runtime {
     /// `MouseEvent`'s `clientX`/`clientY` (LLP 1021 D2).
     package func press(_ view: UInt32, held: String = "", at client: CGPoint? = nil, now: Double) -> Batch {
         let line = client.map { "\(Double($0.x)),\(Double($0.y)),\(held)" } ?? held
-        return on { read(exact_dispatch(rt, view, 0, write(line), now)) }
+        return send(view, 0, line, now: now)
     }
     /// The pointer over the view (`true`) or gone from it.
-    package func hover(_ view: UInt32, over: Bool, now: Double) -> Batch { on { read(exact_dispatch(rt, view, over ? 2 : 3, 0, now)) } }
-    package func focus(_ view: UInt32, now: Double) -> Batch { on { read(exact_dispatch(rt, view, 4, 0, now)) } }
-    package func blur(_ view: UInt32, now: Double) -> Batch { on { read(exact_dispatch(rt, view, 5, 0, now)) } }
+    package func hover(_ view: UInt32, over: Bool, now: Double) -> Batch { later(view, over ? 2 : 3, now: now) }
+    package func focus(_ view: UInt32, now: Double) -> Batch { send(view, 4, now: now) }
+    package func blur(_ view: UInt32, now: Double) -> Batch { send(view, 5, now: now) }
     package func focusEvent(_ view: UInt32, entering: Bool, target: String, related: String?, now: Double) -> Batch {
         let payload = "\(target.utf8.count):\(target)" + (related.map { "1\($0)" } ?? "0")
-        return on { read(exact_dispatch(rt, view, entering ? 46 : 47, write(payload), now)) }
+        return send(view, entering ? 46 : 47, payload, now: now)
     }
     package func contextmenu(_ view: UInt32, now: Double) -> Batch { on { read(exact_dispatch(rt, view, 10, 0, now)) } }
     /// DOM's `beforeunload` (36) at a node that hears it (studio diary R17).
@@ -548,7 +551,8 @@ package final class Runtime {
     /// `pointerdown` (29), `pointerup` (30) or `pointermove` (31) with its
     /// record (LLP 1005 §3, LLP 1056 §3 stage 3).
     package func pointer(_ view: UInt32, _ kind: PointerKind, _ sample: PointerSample, now: Double) -> Batch {
-        on { read(exact_dispatch(rt, view, kind.rawValue, write(sample.line), now)) }
+        // A move's answer is read by no caller (the down's and up's `preventDefault` are), so it is deferred.
+        kind.rawValue == 31 ? later(view, kind.rawValue, sample.line, now: now) : send(view, kind.rawValue, sample.line, now: now)
     }
     /// The clipboard's `copy` (32), `cut` (33) or `paste` (34) with its
     /// plain text; a `contextmenu` (10) with its pointer line, a `wheel`
@@ -562,7 +566,7 @@ package final class Runtime {
     package func selectionChange(_ view: UInt32, _ text: String, start: Int, end: Int, rects: [CGRect], now: Double) -> Batch {
         let boxes = rects.flatMap { [$0.minX, $0.minY, $0.width, $0.height].map { String(Double($0)) } }
         let payload = ([String(start), String(end), String(rects.count)] + boxes + [text]).joined(separator: ",")
-        return on { read(exact_dispatch(rt, view, 35, write(payload), now)) }
+        return later(view, 35, payload, now: now)
     }
     package func submit(_ view: UInt32, now: Double) -> Batch { on { read(exact_dispatch(rt, view, 7, 0, now)) } }
     package func media(_ view: UInt32, event: String, payload: String, now: Double) -> Batch {
@@ -593,14 +597,75 @@ package final class Runtime {
     /// A key down (kind 6), up (43) or capture (44, #140) at the view: its chord by the
     /// web's key name, then its code and repeat (`KeyPress.payload`).
     package func key(_ view: UInt32, _ payload: String, up: Bool = false, capture: Bool = false, now: Double) -> Batch {
-        return on {
-            let n = write(payload)
-            return read(exact_dispatch(rt, view, capture ? 44 : up ? 43 : 6, n, now))
-        }
+        return send(view, capture ? 44 : up ? 43 : 6, payload, now: now)
+    }
+    /// A key's whole propagation path (`view`, its
+    /// payload, whether it is the capture phase) in one owner call and one
+    /// commit; the runner skips the rest of the path after `stopPropagation`.
+    package func keyPath(_ path: [(UInt32, String, Bool)], up: Bool, now: Double) -> Batch {
+        let entries = path.map { Dispatch($0.0, $0.2 ? 44 : up ? 43 : 6, $0.1, path: true) }
+        let all = deferred + entries; deferred = []
+        return dispatchMany(all, now: now)
     }
 
     package func fieldEvent(_ view: UInt32, _ kind: UInt32, _ payload: String, now: Double) -> Batch {
-        on { read(exact_dispatch(rt, view, kind, write(payload), now)) }
+        // A field's `selectionchange` (52) cannot be cancelled and no caller reads its answer either.
+        kind == 54 || (kind == 52) ? later(view, kind, payload, now: now) : send(view, kind, payload, now: now)
+    }
+
+    // MARK: Batched input
+
+    /// An event whose answer is deferred (selectionchange, a text field's `input`)
+    /// waits in `deferred`, and goes to the owner with the next event
+    /// that needs an answer or when the session flushes the turn (`onDeferred`), all of them in one call that
+    /// commits once.
+
+    package struct Dispatch {
+        package var view: UInt32, kind: UInt32, payload: Data, path: Bool
+        /// Non-path default/input entries are skipped after `preventDefault`.
+        package var echo = false
+        package init(_ view: UInt32, _ kind: UInt32, _ payload: String = "", path: Bool = false, echo: Bool = false) {
+            self.view = view; self.kind = kind; self.payload = Data(payload.utf8); self.path = path; self.echo = echo
+        }
+    }
+    package private(set) var deferred: [Dispatch] = []
+    /// Told when the first event of a turn is deferred: the session schedules their dispatch.
+    package var onDeferred: (() -> Void)?
+    package func dispatchMany(_ events: [Dispatch], now: Double) -> Batch {
+        var data = Data()
+        func word(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        for e in events { word(e.view); word(e.kind); word((e.path ? 1 : 0) | (e.echo ? 2 : 0)); word(UInt32(e.payload.count)); data.append(e.payload) }
+        return on { read(exact_dispatch_many(rt, write(data), now)) }
+    }
+    /// One event that needs its answer now, after the deferred ones, in the same owner call.
+    package func send(_ view: UInt32, _ kind: UInt32, _ payload: String = "", now: Double) -> Batch {
+        guard !deferred.isEmpty else { return on { read(exact_dispatch(rt, view, kind, write(payload), now)) } }
+        let all = deferred + [Dispatch(view, kind, payload)]; deferred = []
+        return dispatchMany(all, now: now)
+    }
+    /// One event no caller reads: deferred until the input turn ends (its batch is `Runtime.busy`, which a session ignores).
+    package func later(_ view: UInt32, _ kind: UInt32, _ payload: String = "", now: Double) -> Batch {
+        if holds() { return Runtime.heldBatch }
+        guard onDeferred != nil else { return send(view, kind, payload, now: now) }
+        deferred.append(Dispatch(view, kind, payload))
+        if deferred.count == 1 { onDeferred?() }
+        return Runtime.busy
+    }
+    /// The deferred events, taken for an owner call main does not wait for.
+    package func takeDeferred() -> [Dispatch] { let all = deferred; deferred = []; return all }
+    /// `events` dispatched as one list on the owner, not waited for; `done` runs there with the batch.
+    package func dispatchManyAsync(_ events: [Dispatch], now: Double, done: @escaping (Batch) -> Void) {
+        if holds() { Owner.shared.post { done(Runtime.heldBatch) }; return }
+        // The top layer as main sees it now, installed on the owner before the list, as `on` does.
+        let (open, modal) = topLayer?() ?? ([], nil)
+        var data = Data()
+        func word(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        for e in events { word(e.view); word(e.kind); word((e.path ? 1 : 0) | (e.echo ? 2 : 0)); word(UInt32(e.payload.count)); data.append(e.payload) }
+        Owner.shared.post { [self] in
+            guard !destroyed else { return }
+            installTopLayer(open, modal: modal)
+            done(read(exact_dispatch_many(rt, write(data), now)))
+        }
     }
     /// A checkbox's state: `change` when `commit`, else `input`.
     package func checked(_ view: UInt32, _ checked: Bool, commit: Bool, now: Double) -> Batch {
@@ -895,6 +960,20 @@ package final class Runtime {
     package func tick(now: Double, frame: Double? = nil) -> Batch { on { read(frame.map { exact_tick_at(rt, now, $0) } ?? exact_tick(rt, now)) } }
     package func scheme(dark: Bool) -> Batch { on { read(exact_scheme(rt, dark ? 1 : 0)) } }
     package func viewScheme(_ view: UInt32, dark: Bool) -> Batch { on { read(exact_view_scheme(rt, view, dark ? 1 : 0)) } }
+    /// Several views' schemes in one owner call, each its own batch, in order.
+    package func viewSchemes(_ views: [(UInt32, Bool)]) -> [Batch] {
+        return [
+            on {
+                var data = Data(capacity: views.count * 8)
+                for (view, dark) in views {
+                    withUnsafeBytes(of: view.littleEndian) { data.append(contentsOf: $0) }
+                    withUnsafeBytes(of: UInt32(dark ? 1 : 0).littleEndian) { data.append(contentsOf: $0) }
+                }
+                return read(exact_view_schemes(rt, write(data)))
+            }
+        ]
+
+    }
 
     /// Host intrinsic sizes (nil clears one), under one layout.
     package func intrinsics(_ sizes: [(UInt32, CGSize?)]) -> Batch {

@@ -146,6 +146,7 @@ final class AsyncAdvanceTests: XCTestCase {
         XCTAssertEqual(slot(session, "log") as? String, "b@2 ", "the current price, though the row showed 1")
         XCTAssertFalse(session.advanceInFlight, "the held commit applied before the press's batch")
         session.presenter.onInput?(field, "x")
+        session.drainFill() // a field's `input` goes to the owner at the end of the turn
         XCTAssertEqual(slot(session, "log") as? String, "b@2 b:x ")
         XCTAssertNotNil(id(session, "row-b"))
         XCTAssertNil(id(session, "row-a"))

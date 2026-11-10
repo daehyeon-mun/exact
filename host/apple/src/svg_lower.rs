@@ -858,6 +858,27 @@ pub(crate) fn transition_specs(
             track.values.insert(0, t.from);
             track.curves.insert(0, LINEAR);
         }
+        // On the Mac a translate plays additively, relative to the target the engine
+        // presents, so it composes with what else the model transform carries (a layout transition's offset).
+        let additive = p == Property::Translate && cfg!(target_os = "macos");
+        if additive {
+            for v in &mut track.values {
+                v.x -= t.to.x;
+                v.y -= t.to.y;
+                v.z -= t.to.z;
+                v.w -= t.to.w;
+            }
+        }
+        // The target rides with the spec: the presenter sets the model value to it in the batch that installs the
+        // animation, so the relative values never add to a model still at the start (the thumb shown twice offset).
+        let flag = if additive {
+            format!(
+                ",\"a\":1,\"to\":[{},{},{},{}]",
+                t.to.x, t.to.y, t.to.z, t.to.w
+            )
+        } else {
+            String::new()
+        };
         let parts: &[(usize, &str)] = match p {
             Property::Translate => &[
                 (0, "transform.translation.x"),
@@ -876,7 +897,7 @@ pub(crate) fn transition_specs(
         let specs: Vec<String> = parts.iter().map(|(axis, path)| {
             let (times, values, curves) = track_json(&track, p, scale, *axis, Some((size.0 as f64, size.1 as f64)));
             format!(
-                "{{\"id\":\"transition#{path}\",\"k\":\"{path}\",\"s\":{},\"dl\":0,\"d\":{duration},\"n\":1,\"t\":[{times}],\"v\":[{values}],\"c\":[{curves}],\"fill\":2,\"h\":null}}", t.start,
+                "{{\"id\":\"transition#{path}\",\"k\":\"{path}\",\"s\":{},\"dl\":0,\"d\":{duration},\"n\":1,\"t\":[{times}],\"v\":[{values}],\"c\":[{curves}],\"fill\":2,\"h\":null{flag}}}", t.start,
             )
         }).collect();
         let spec = specs.join(",");
@@ -1087,7 +1108,8 @@ fn box_eligible(
     if turns
         && (n.layout_position() == exact_kernel::PositionType::Sticky
             || !s.transform_origin.centred()
-            || !s.rare.layout_transition.0.is_empty()
+            || (!s.rare.layout_transition.0.is_empty()
+                && !(cfg!(target_os = "macos") && props == [Property::Translate]))
             || subtree_any(kernel, n.id, &|id| {
                 interactive(id)
                     || kernel.node(id).is_some_and(|node| {

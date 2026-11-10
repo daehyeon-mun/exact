@@ -767,7 +767,7 @@ final class TextMetricsTests: XCTestCase {
         XCTAssertNil(tall.textRaster, "AppKit's strips paint it, backing only the visible part")
     }
 
-    func testTextTooSmallToRepayASurfaceDrawsInItsLayer() throws {
+    func testSmallTextUsesARasterSurface() throws {
         _ = NSApplication.shared
         let session = ExactApp.shared.makeSession(label: "text-small")
         let presenter = session.presenter
@@ -776,8 +776,8 @@ final class TextMetricsTests: XCTestCase {
         window.isReleasedWhenClosed = false
         window.contentView = presenter.viewport
         defer { window.close(); session.destroy() }
-        // A square just under the minimum at this window's scale.
-        let side = Double((TextRasterizer.minPixels.squareRoot() / window.backingScaleFactor).rounded(.down) - 1)
+        // A short cell is admitted just like a larger paragraph.
+        let side = 48.0
         presenter.apply(batchFixture(ops: [
             ["op": "create", "id": 1, "kind": "view"],
             ["op": "create", "id": 2, "kind": "text", "props": ["text": "cell"]],
@@ -789,13 +789,13 @@ final class TextMetricsTests: XCTestCase {
             ["op": "frame", "id": 3, "x": 0.0, "y": 150.0, "w": 400.0, "h": 60.0],
         ], timers: false, motion: false, clock: nil, error: nil))
         let small = try XCTUnwrap(presenter.views[2]), paragraph = try XCTUnwrap(presenter.views[3])
-        XCTAssertFalse(small.rastersText, "a surface costs more than drawing a few glyphs")
-        small.displayIfNeeded()
-        XCTAssertNil(small.textRaster)
+        XCTAssertTrue(small.rastersText)
+        XCTAssertTrue(presenter.textRasters.ensure(small, urgent: true))
+        XCTAssertNotNil(small.textRaster)
         XCTAssertTrue(paragraph.rastersText)
     }
 
-    func testShrinkingBelowRasterThresholdRetiresAcceptedInkAndCanGrowAgain() throws {
+    func testExceedingRasterHeightRetiresAcceptedInkAndCanReturn() throws {
         _ = NSApplication.shared
         let session = ExactApp.shared.makeSession(label: "text-shrink")
         let presenter = session.presenter
@@ -816,7 +816,7 @@ final class TextMetricsTests: XCTestCase {
         ])
         let node = try XCTUnwrap(presenter.views[2])
         let scale = window.backingScaleFactor
-        let smallHeight = Double(TextRasterizer.minPixels / (400 * scale * scale) - 1)
+        let tallHeight = Double(TextRasterizer.maxHeight + 1)
         for clamp in [0, 2] { for shadow in [false, true] {
             batch([["op": "frame", "id": 2, "x": 0.0, "y": 0.0, "w": 400.0, "h": 80.0]])
             var style: [String: Any] = ["line_clamp": Double(clamp)]
@@ -829,7 +829,7 @@ final class TextMetricsTests: XCTestCase {
             node.showTextRaster(pixels, for: key)
             XCTAssertNotNil(node.textRaster)
             if shadow { XCTAssertNotNil(node.textRasterOverflowLayer) }
-            batch([["op": "frame", "id": 2, "x": 0.0, "y": 0.0, "w": 400.0, "h": smallHeight]])
+                batch([["op": "frame", "id": 2, "x": 0.0, "y": 0.0, "w": 400.0, "h": tallHeight]])
             XCTAssertFalse(node.rastersText)
             XCTAssertNil(node.textRaster, "old ink cannot await a worker for a directly drawn paragraph")
             XCTAssertNil(node.textRasterOverflowLayer, "old overflow and shadows must disappear")
@@ -1066,7 +1066,7 @@ final class TextMetricsTests: XCTestCase {
 
     /// X82's first-mount case: button labels AppKit asks for while they are
     /// off screen (its overdraw) get a worker's pixels, which wait for the
-    /// pump to publish them; one asked while both workers are busy is
+    /// pump to publish them; one asked while all workers are busy is
     /// declined, and the pump asks it again. None can be selected.
     func testOffscreenButtonLabelsArePublishedByThePump() throws {
         _ = NSApplication.shared
@@ -1077,25 +1077,26 @@ final class TextMetricsTests: XCTestCase {
         window.isReleasedWhenClosed = false
         window.contentView = presenter.viewport
         defer { RegionTextExecutor.queue.isSuspended = false; window.close(); session.destroy() }
+        let count = RasterScheduling.rasterWorkers + 1
         var ops: [[String: Any]] = [["op": "create", "id": 1, "kind": "view"]]
-        for row in 0..<3 {
-            ops += [["op": "create", "id": 10 + row, "kind": "button", "handlers": ["press"]],
-                    ["op": "create", "id": 20 + row, "kind": "text", "props": ["text": "Commit title \(row) MMMMMMMM"]]]
+        for row in 0..<count {
+            ops += [["op": "create", "id": 10 + row * 2, "kind": "button", "handlers": ["press"]],
+                    ["op": "create", "id": 11 + row * 2, "kind": "text", "props": ["text": "Commit title \(row) MMMMMMMM"]]]
         }
-        ops += [["op": "children", "id": 1, "ids": [10, 11, 12]], ["op": "roots", "ids": [1]],
+        ops += [["op": "children", "id": 1, "ids": (0..<count).map { 10 + $0 * 2 }], ["op": "roots", "ids": [1]],
                 ["op": "frame", "id": 1, "x": 0.0, "y": 0.0, "w": 500.0, "h": 2000.0]]
-        for row in 0..<3 {
-            ops += [["op": "children", "id": 10 + row, "ids": [20 + row]],
-                    ["op": "frame", "id": 10 + row, "x": 0.0, "y": 800.0 + Double(row) * 50, "w": 420.0, "h": 42.0],
-                    ["op": "frame", "id": 20 + row, "x": 0.0, "y": 0.0, "w": 400.0, "h": 42.0]]
+        for row in 0..<count {
+            ops += [["op": "children", "id": 10 + row * 2, "ids": [11 + row * 2]],
+                    ["op": "frame", "id": 10 + row * 2, "x": 0.0, "y": 800.0 + Double(row) * 50, "w": 420.0, "h": 42.0],
+                    ["op": "frame", "id": 11 + row * 2, "x": 0.0, "y": 0.0, "w": 400.0, "h": 42.0]]
         }
         presenter.apply(batchFixture(ops: ops, timers: false, motion: false, clock: nil, error: nil))
-        let labels = try (20..<23).map { try XCTUnwrap(presenter.views[UInt32($0)]) }
+        let labels = try (0..<count).map { try XCTUnwrap(presenter.views[UInt32(11 + $0 * 2)]) }
         XCTAssertTrue(labels.allSatisfy { !$0.textSelectable && $0.rastersText && !presenter.textIsVisible($0) && $0.textRasterKey == nil })
-        // AppKit's overdraw asks for the three layers while the workers are held.
+        // AppKit's overdraw asks for every layer while the workers are held.
         RegionTextExecutor.queue.isSuspended = true
         for label in labels { label.updateLayer() }
-        XCTAssertEqual(labels.map { $0.textRasterKey != nil }, [true, true, false], "two workers; the third is declined")
+        XCTAssertEqual(labels.map { $0.textRasterKey != nil }, Array(repeating: true, count: count - 1) + [false], "the worker limit admits its capacity and declines the next label")
         XCTAssertTrue(labels.allSatisfy { $0.layer?.contents == nil })
         RegionTextExecutor.queue.isSuspended = false
         // The display link's pump, a frame at a time, as the workers finish.

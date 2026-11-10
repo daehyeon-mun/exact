@@ -35,6 +35,8 @@ mod arrange_tests;
 pub(crate) mod canvas2d;
 #[path = "colors.rs"]
 mod colors;
+#[path = "commit.rs"]
+mod commit;
 #[path = "content_region/host.rs"]
 mod content_region_host;
 #[cfg(test)]
@@ -60,6 +62,9 @@ mod height_drag;
 mod height_tests;
 #[path = "holds.rs"]
 mod holds;
+#[cfg(test)]
+#[path = "input_batch_tests.rs"]
+mod input_batch_tests;
 #[path = "live.rs"]
 mod live;
 #[path = "midi.rs"]
@@ -68,6 +73,8 @@ mod midi;
 mod paint;
 #[path = "paragraph.rs"]
 mod paragraph;
+#[path = "retained.rs"]
+mod retained;
 use paragraph::props_for;
 #[path = "persistence.rs"]
 mod persistence;
@@ -265,6 +272,8 @@ pub struct Host<D: DataSource> {
     holds_told: colors::Told,
     /// The top-layer boxes covered while closed (`closed.rs`).
     closed: layout::closed::Closed,
+    /// Presentation of detached subtrees and the last paragraph sent.
+    retained: retained::RetainedPresentation,
 }
 
 pub(crate) use crate::plan_bytes::PlanBytes;
@@ -525,7 +534,14 @@ impl<D: DataSource> Host<D> {
             keys: IdMap::default(),
             inline_runs: IdMap::default(),
             // LLP 1126 D10: watchOS has no Core Animation presenter for box motion or path morphs.
-            svg: svg::SvgState::new(cfg!(any(target_os = "ios", target_os = "tvos"))),
+            svg: {
+                let mut svg = svg::SvgState::new(cfg!(any(target_os = "ios", target_os = "tvos")));
+                // On the Mac too, Core Animation plays a box's eligible
+                // opacity, background-colour and transform transitions, so their frames come from the render
+                // server, not from a main-thread tick and a commit each.
+                svg.play_transitions |= cfg!(target_os = "macos");
+                svg
+            },
             canvas_held: IdSet::default(),
             canvas_kept: Default::default(),
             canvas_deferred: false,
@@ -592,6 +608,7 @@ impl<D: DataSource> Host<D> {
             facts_told: None,
             holds_told: Default::default(),
             closed: Default::default(),
+            retained: Default::default(),
         };
         let mut batch = Batch::new();
         host.native_prepare_candidate().map_err(HostError::Layout)?;
@@ -951,6 +968,44 @@ impl<D: DataSource> Host<D> {
         self.commit(&a.receipts, a.error.map(|e| format!("{e:?}")))
     }
 
+    /// Several events one input caused, each dispatched at
+    /// `now_ms` in order, then one commit for all of them. An entry marked
+    /// `path` belongs to one propagation path: once an action in it calls
+    /// `stopPropagation`, the path's later entries are skipped. A refusal
+    /// stops the list there; the commits before it are in the batch.
+    pub fn dispatch_many(&mut self, events: Vec<(ViewId, Event, u32)>, now_ms: f64) -> String {
+        self.now_ms = now_ms.max(self.now_ms);
+        let mut receipts = Vec::new();
+        let mut error = None;
+        let mut stopped = false;
+        // Flag 2 marks echoed input. Cancellation suppresses its default/input events,
+        // while key-path listeners continue until stopPropagation.
+        let start = self.runner.command_count();
+        for (view, event, flags) in events {
+            let path = flags & 1 != 0;
+            if path && stopped {
+                continue;
+            }
+            if flags & 2 != 0 && !path && self.runner.command_since(start, "preventDefault") {
+                continue;
+            }
+            if !path {
+                stopped = false;
+            }
+            let from = self.runner.command_count();
+            let a = self.runner.dispatch_at(view, event, self.now_ms);
+            receipts.extend(a.receipts);
+            if a.error.is_some() {
+                error = a.error;
+                break;
+            }
+            if path && self.runner.command_since(from, "stopPropagation") {
+                stopped = true;
+            }
+        }
+        self.commit(&receipts, error.map(|e| format!("{e:?}")))
+    }
+
     /// The platform's own Back from visit `id` (LLP 1115 D5), at `now_ms`.
     pub fn host_back(&mut self, id: u64, now_ms: f64) -> String {
         self.own_navigation(now_ms, |runner| runner.host_back(id))
@@ -1169,6 +1224,8 @@ impl<D: DataSource> Host<D> {
             Err(e) => return self.finish(batch, error.or(Some(format!("viewport: {e:?}")))),
         };
         self.viewport = (width, height);
+        // A viewport reader can commit without touching nodes. Its new offer still needs layout.
+        self.layout_owed = true;
         self.height_targets_dirty = true;
         self.presence.snap = true;
         if let Some(receipt) = receipt {
@@ -1228,163 +1285,6 @@ impl<D: DataSource> Host<D> {
         let arrange = self.arrange_after_commit(&mut batch);
         self.group_after_commit(&mut batch);
         self.commit_finish(batch, error.or(arrange))
-    }
-
-    /// The receipts into the mirror, the engine and layout; not yet presented.
-    fn commit_tree(
-        &mut self,
-        receipts: &[Timed],
-        error: Option<String>,
-        mut batch: Batch,
-    ) -> (Batch, Option<String>) {
-        let _roles = self.runner.bind_roles(); // Its own, crossing (LLP 1121 stage 5).
-        self.native_retire_removed_owner(&mut batch);
-        self.native_note_receipts(receipts);
-        let bulk_handlers = (receipts
-            .iter()
-            .map(|t| t.receipt.created.len())
-            .sum::<usize>()
-            > 1)
-        .then(|| self.runner.handlers());
-        self.close_new_top_layer(receipts);
-        for t in receipts {
-            let r = &t.receipt;
-            // Flights capture their leavers before an exit takes them
-            // out of the presenter's maps (LLP 1013.000 D4.1).
-            self.begin_flights(r, &mut batch);
-            self.begin_exits(r, &mut batch);
-            for key in &r.destroyed {
-                if let Some(id) = self.keys.remove(key) {
-                    self.ranks.remove(&id);
-                    self.paint.runs.remove(&id);
-                    if let Some((owner, _)) = self.inline_runs.remove(&id) {
-                        self.dirty_paragraphs.insert(owner);
-                    } else if self.svg.destroyed(id) {
-                        self.mirror.remove(&id);
-                    } else if !self.native_selected_id(id) {
-                        self.mirror.remove(&id);
-                        self.end_flight_of(id);
-                        if !self.exit_holds(id, &mut batch) {
-                            batch.destroy(id);
-                        }
-                    }
-                    self.transform_drags.remove(id);
-                }
-            }
-            for key in &r.created {
-                if let Some(node) = self.runner.kernel().node_by_key(*key) {
-                    let id = node.id;
-                    let handlers = bulk_handlers.as_ref().map_or_else(
-                        || self.runner.handlers_of(id),
-                        |all| all.get(&id).cloned().unwrap_or_default(),
-                    );
-                    self.create(id, &handlers, &mut batch);
-                }
-            }
-            for key in &r.touched {
-                if let Some(node) = self.runner.kernel().node_by_key(*key) {
-                    let id = node.id;
-                    self.update(id, &mut batch);
-                }
-            }
-        }
-        // Receipts share the final kernel tree. A parent touched by an early
-        // timer can already name a child created by a later timer in this seek.
-        // All surviving views must exist before any final child list is attached.
-        for t in receipts {
-            for key in t.receipt.created.iter().chain(t.receipt.touched.iter()) {
-                if let Some(node) = self.runner.kernel().node_by_key(*key) {
-                    self.emit_children(node.id, &mut batch);
-                }
-            }
-        }
-        self.emit_paragraphs(&mut batch);
-        let roots = self.runner.roots();
-        if roots != self.roots {
-            self.roots = roots.clone();
-            batch.roots(&roots);
-        }
-        if !receipts.is_empty() {
-            self.emit_title(&mut batch);
-        }
-        let mut height_target_error = None;
-        // Runner receipts retain due-time order. Unobserved motion starts at
-        // that due time; a late receipt cannot rewind an already presented
-        // frame/hold. Match Web's floor at the engine's current presentation
-        // time, not this batch's final time. No timer work enters pointer moves.
-        for t in receipts {
-            let seek = self.engine.advance(self.engine_time(t.at_ms));
-            debug_assert!(seek.is_ok(), "the clock never runs backwards here");
-            let mut sync = self.runner.kernel().motion_sync(&t.receipt);
-            self.spare_exits(&mut sync);
-            let applied = sync.apply(&mut self.engine);
-            debug_assert!(applied.is_ok(), "kernel rows are always valid engine input");
-            let runner = &self.runner;
-            svg_lower::eligibility(
-                runner.kernel(),
-                &mut self.engine,
-                &sync,
-                self.svg.box_motion,
-                &|v| !runner.handlers_of(v).is_empty(),
-            );
-            svg_lower::hand_over_paths(runner.kernel(), &mut self.engine, self.svg.box_motion);
-            // A reveal changes a held play without changing its style row.
-            for (key, _) in &sync.animations {
-                if let Some(view) = self.keys.get(&node_key(*key)).copied() {
-                    self.svg.element(runner.kernel(), view);
-                }
-            }
-            for view in svg_lower::glass_sampling(self.runner.kernel(), &mut self.engine) {
-                self.svg.element(self.runner.kernel(), view);
-            }
-            self.play_exits(&mut batch);
-            self.start_flights(&t.receipt);
-            self.seed_layout(&t.receipt, &mut batch);
-            self.sync_paint(&t.receipt, &mut batch);
-            self.reconcile_height_handles(&mut batch, true);
-            let synced = self.sync_height_owner();
-            debug_assert!(synced.is_ok(), "validated height sync");
-            if let Err(error) = self.sync_height_transitions() {
-                height_target_error.get_or_insert(error);
-            }
-            // Latest target/declaration must reach the held slot before an
-            // invalidated header cancels it (negative delays sample at once).
-            self.cancel_invalid_height_drag();
-            self.reconcile_transform_drags(&mut batch);
-        }
-        let seek = self.engine.advance(self.engine_time(self.now_ms));
-        debug_assert!(seek.is_ok(), "the clock never runs backwards here");
-        // An advance whose commits changed no node (a frame task that only
-        // moved state nothing shows; a `sent` reader answered at each MIDI
-        // message's time, LLP 1125 D6, with nothing on screen reading it)
-        // lays out only what such a commit can move (`inert_layout`): each
-        // would cost a whole layout and paint order walk otherwise.
-        let inert = self.in_advance && receipts.iter().all(|t| unchanged(&t.receipt));
-        let layout_error = if height_target_error.is_some() {
-            self.layout_owed = true;
-            height_target_error
-        } else if inert {
-            self.inert_layout(&mut batch, !receipts.is_empty()).err()
-        } else {
-            self.layout(&mut batch).err()
-        };
-        if layout_error.is_some() && !receipts.is_empty() {
-            self.emit_ranks(&mut batch);
-        }
-        self.canvas_turn(&mut batch);
-        for s in self.runner.take_surface_updates() {
-            batch.surface(&s);
-        }
-        // The capabilities the actions called, after their commits, in order.
-        // @ref LLP 1038 D7 — drain once, after all commits in this batch.
-        if let Some(change) = self.runner.take_router_change() {
-            batch.router(&change);
-        }
-        for c in self.runner.take_commands() {
-            batch.command(&c.name, &c.args, c.source);
-        }
-        batch.timed(&mut self.runner, false);
-        (batch, error.or(layout_error))
     }
 
     /// Persist, then the presentation after every commit in the batch.

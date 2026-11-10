@@ -10,7 +10,7 @@
 //
 // `NodeView.draw` still paints text for everything this declines: a
 // selection, a capture, a decorated text box, a paragraph
-// taller than a screen, and one too small to repay a surface (unless HDR).
+// taller than a screen.
 #if os(macOS)
 import AppKit
 import CoreText
@@ -22,12 +22,6 @@ final class TextRasterizer {
     /// more than every other text pixel in the document together. AppKit's
     /// strips back only what is on screen.
     static let maxHeight: CGFloat = 1024
-    /// Pixels. A surface has a fixed cost — an IOSurface, and its registration
-    /// with the render server when a layer first shows it — that a few glyphs
-    /// never repay: a table of 32 narrow cells made one per cell as each row
-    /// mounted and scrolled at 31–35 fps, where AppKit drawing the cells into
-    /// their layers' own backing stores made 51–58. Smaller text draws.
-    static let minPixels: CGFloat = 16384
     // Keep italic overhang and ink outside tight line boxes, but never size
     // a surface to an unbreakable line's potentially unbounded advance.
     static let maxInkOverflow = TextRasterJob.maxInkOverflow
@@ -36,8 +30,7 @@ final class TextRasterizer {
     // the next pump tries the still-nearby paragraphs again when a worker is
     // free, so navigation and resize cannot queue obsolete document pixels.
     private var active = 0
-    private static let maxConcurrent = 2
-
+    private static let maxConcurrent = RasterScheduling.rasterWorkers
     private func key(_ node: NodeView) -> TextRasterKey {
         TextRasterKey(spec: node.paragraphSpec(), size: node.bounds.size,
                       box: node.paragraphBox(), scale: node.pixelScale ?? 2)
@@ -163,7 +156,8 @@ final class TextRasterizer {
             // A later width may have superseded this entire group.
             jobs.first?.0.presenter?.requestTextPublication()
         }
-        if result.group.wait(timeout: .now() + max(0, wait)) == .success {
+        let budget = wait
+        if result.group.wait(timeout: .now() + max(0, budget)) == .success {
             publish()
         } else {
             for (node, _, _) in jobs { node.useTextStrips() }
@@ -188,7 +182,21 @@ extension NodeView {
     /// something `draw` paints. Asked by AppKit through `wantsUpdateLayer`.
     var rastersText: Bool { canRasterText && !textRasterUsesStrips }
 
+    /// Within one text refresh pass (`Presenter.rasterRefreshEpoch`
+    /// nonzero) a paragraph's answer is asked once: both of the pass's loops ask every candidate, and the
+    /// answer reads the backing scale through the view's transforms.
+
     var canRasterText: Bool {
+        let epoch = Presenter.rasterRefreshEpoch
+        if epoch != 0 {
+            if rasterMemo.0 == epoch { return rasterMemo.1 }
+            let answer = canRasterTextNow
+            rasterMemo = (epoch, answer)
+            return answer
+        }
+        return canRasterTextNow
+    }
+    private var canRasterTextNow: Bool {
         if textRasterFailed, textRasterKey != nil { return false }
         // Cheapest first: this is asked of every visible paragraph on every
         // text refresh, and the ancestor walk and the paragraph's spec are
@@ -200,22 +208,9 @@ extension NodeView {
         guard kind == "text", isParagraph, flowShapes.isEmpty, columnRecord == nil, !hasBoxPaint, !Capture.capturing, backgroundClip != "text",
               bounds.width > 0, bounds.height > 0, bounds.height <= TextRasterizer.maxHeight,
               window != nil, readerParagraph == nil, let presenter else { return false }
-        // Canvas snapshots must share our surfaces, not AppKit's backing
-        // stores: borrowing those can blank the live label after scrolling.
-        guard !textIsSmall || canvasAbove != nil else { return false }
         if presenter.selection.isActive, let selected = presenter.selection.range(self), selected.length > 0 { return false }
         if presenter.session?.regions.owns(self) == true { return false }
         return !paintsVisibleInlineRun
-    }
-
-    /// Too few pixels to repay a surface. Such text draws whole rather than in
-    /// bands admitted as it scrolls: bands, and their visit per frame, are for
-    /// paragraphs too large to paint at once. HDR text is never small: only a
-    /// raster's layers follow `dynamic-range-limit` (LLP 1100 D8).
-    var textIsSmall: Bool {
-        let scale = pixelScale ?? 2
-        guard bounds.width * bounds.height * scale * scale < TextRasterizer.minPixels else { return false }
-        return !(isParagraph && paragraphHeadroom(drawing: true) > 1)
     }
 
     /// Whether the pump still owes this paragraph pixels.

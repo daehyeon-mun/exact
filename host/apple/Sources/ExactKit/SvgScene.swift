@@ -165,6 +165,7 @@ enum CssAnimations {
         a.setValue(values, forKey: "values")
         if let timing { a.timingFunctions = timing }
         a.calculationMode = .linear
+        a.isAdditive = spec.additive
         a.duration = duration
         a.repeatCount = repeatCount < 0 ? .infinity : Float(repeatCount)
         let fill = spec.fill

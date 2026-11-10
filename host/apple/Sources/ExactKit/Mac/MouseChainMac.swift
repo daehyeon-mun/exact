@@ -689,6 +689,9 @@ extension Presenter {
     /// content with no button down: the agent's under the agent (never the
     /// system cursor, which the drive does not own), else the cursor, and
     /// only where no other window covers it when `frontmost` is asked.
+    static func frontmost(at point: NSPoint, _ window: Int) -> Bool {
+        NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == window
+    }
     func restingPointer(frontmost: Bool = false) -> NSPoint? {
         guard pointerHeld == nil, pointerSource == nil, let window = viewport.window, let content = window.contentView else { return nil }
         let p: NSPoint
@@ -696,7 +699,7 @@ extension Presenter {
             // Hover is the key window's (LLP 1115.000 D7.9).
             guard !ExactEnv.agentMode, window.isVisible, window.isKeyWindow, NSEvent.pressedMouseButtons == 0 else { return nil }
             p = window.mouseLocationOutsideOfEventStream
-            if frontmost, NSWindow.windowNumber(at: NSEvent.mouseLocation, belowWindowWithWindowNumber: 0) != window.windowNumber { return nil }
+            if frontmost, !Self.frontmost(at: NSEvent.mouseLocation, window.windowNumber) { return nil }
         }
         return content.bounds.contains(content.convert(p, from: nil)) ? p : nil
     }
@@ -862,5 +865,20 @@ private final class HoldBox {
     var hid = false
     var alpha: CGFloat = 1
     init(_ presenter: Presenter) { self.presenter = presenter }
+}
+
+extension NodeView {
+    /// A node that hears hover or pointer moves tracks the pointer in the key window (`mouseEntered`, `mouseMoved`).
+    func syncHoverTracking() {
+        let wants = handlers.contains("hover") || handlers.contains("pointermove") || inlineText.contains(where: { $0.handlers.contains("hover") })
+        if wants, tracking == nil {
+            let t = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
+            addTrackingArea(t)
+            tracking = t
+        } else if !wants, let t = tracking {
+            removeTrackingArea(t)
+            tracking = nil
+        }
+    }
 }
 #endif

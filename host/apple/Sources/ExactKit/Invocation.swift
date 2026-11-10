@@ -100,7 +100,6 @@ extension Presenter {
     }
 }
 
-
 extension Presenter {
     /// HTML chooses the first button, whether or not it names a target.
     /// Inline links and native controls own their activation before that button.
@@ -173,5 +172,8 @@ extension ExactSession {
         var batch = batch
         batch.input = CACurrentMediaTime()
         apply(batch)
+        #if os(macOS)
+        if !ExactEnv.agentFreezes, !batch.ops.isEmpty { CATransaction.flush() }
+        #endif
     }
 }

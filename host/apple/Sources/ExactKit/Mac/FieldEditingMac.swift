@@ -167,6 +167,9 @@ extension NodeView {
     /// AppKit's would be, in AppKit's colour at its own strength; where the
     /// node clips its box, inside the border.
     func showFieldFocus(_ on: Bool) {
+        // Text entry matches :focus-visible for pointer focus too; outline
+        // suppression removes the platform ring, not the author's state look.
+        focusVisible = on
         let show = on && !disabled && !outlineNone && (!isNativeTextControl || textArea != nil || fieldGround != nil)
         let bordered = bordersItself
         // A textarea's scroll view covers the node's own border, so its ring

@@ -215,6 +215,13 @@ impl<D: DataSource> Host<D> {
             if node.is_inline_run() || self.native_protected_id(owner) {
                 continue;
             }
+            if self.retained_hold(owner) {
+                continue;
+            }
+            let kernel = self.runner.kernel();
+            let Some(node) = kernel.node(owner) else {
+                continue;
+            };
             let active = node.props.str(PropId::Text).is_none();
             let mut stack: Vec<_> = node
                 .children()
@@ -297,7 +304,9 @@ impl<D: DataSource> Host<D> {
                 );
             }
             runs.push(']');
-            batch.paragraph(owner, &runs);
+            if !self.retained_same_runs(owner, &runs) {
+                batch.paragraph(owner, &runs);
+            }
         }
     }
 
@@ -317,6 +326,7 @@ impl<D: DataSource> Host<D> {
     }
 
     pub(super) fn create(&mut self, id: ViewId, events: &[EventKind], batch: &mut Batch) {
+        self.retained_forget(id);
         // @ref LLP 1055 D4 — an SVG element is in its `svg`'s scene, not a view.
         if self.svg.element(self.runner.kernel(), id).is_some() {
             let key = self.runner.kernel().node(id).expect("live").key;
@@ -402,6 +412,9 @@ impl<D: DataSource> Host<D> {
             batch.controls = true;
             return;
         }
+        if self.retained_hold(id) {
+            return;
+        }
         self.queue_layout(id);
         if self.reconcile_projection(id, batch) {
             return;
@@ -463,6 +476,9 @@ impl<D: DataSource> Host<D> {
 
     pub(super) fn emit_children(&mut self, id: ViewId, batch: &mut Batch) {
         // An `svg`'s and a `g`'s children are its scene's (LLP 1055 D4).
+        if self.retained_hold(id) {
+            return;
+        }
         let node_type = self.runner.kernel().node(id).expect("live").node_type;
         if node_type == NodeType::Svg || node_type.is_svg_element() {
             self.svg.element(self.runner.kernel(), id);

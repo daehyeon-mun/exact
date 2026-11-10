@@ -67,11 +67,12 @@ extension ExactSession {
     /// @ref LLP 1061 D5 — told after every boot, as the date is, and on each
     /// change: in the same main-thread turn as the boot batch, so the first
     /// frame on screen already reads the user's preferences.
-    func tellPreferences() {
+    func tellPreferences(skippingUnchanged: Bool = false) {
         guard booted, state != .destroyed else { return }
-        apply(runtime.setPreferences(preferenceBits()))
+        let batch = runtime.setPreferences(preferenceBits())
+        if skippingUnchanged { applyUnlessEmpty(batch) } else { apply(batch) }
         // Increased Contrast changes what every platform colour resolves to; the build channel reports it (LLP 1122 D4).
-        reportColors(); app.scheduleStatus()
+        reportColors(skippingUnchanged: skippingUnchanged); app.scheduleStatus()
         #if os(macOS)
         controlTextChanged()
         #endif

@@ -993,6 +993,16 @@ fn style_json_shown(
             .union(StyleMask::of(StyleId::ColorScheme))
     };
     let mut computed = node.computed_style(rows.union(node.style.written));
+    // An inherited `color-scheme` crosses only where a subtree leaves
+    // its parent's view (a dialog, a popover). Elsewhere AppKit's `effectiveAppearance` carries the scheme of
+    // the node that sets it to every view below, so flipping it changes no other node's style.
+    if cfg!(target_os = "macos")
+        && !node.style.written.has(StyleId::ColorScheme)
+        && node.props.str(PropId::SemanticTag) != Some("dialog")
+        && node.props.str(PropId::Popover).is_none()
+    {
+        computed.mask = computed.mask.minus(StyleMask::of(StyleId::ColorScheme));
+    }
     // PlaceholderColor's initial payload is an unread sentinel; absence
     // selects the platform placeholder colour, including after a clear. So
     // for the pressed paint: a cleared row is no pressed look (LLP 1061 D7).

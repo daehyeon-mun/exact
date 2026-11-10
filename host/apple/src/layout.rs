@@ -288,6 +288,9 @@ impl<D: DataSource> Host<D> {
                 continue;
             };
             let id = node.id;
+            if self.retained_hold(id) {
+                continue;
+            }
             let native_protected = self.native_protected_id(id);
             let kernel = self.runner.kernel();
             let Some(node) = kernel.node(id) else {
@@ -499,10 +502,28 @@ impl<D: DataSource> Host<D> {
             return self.layout(batch);
         }
         if !self.height_layout_if_needed(batch)? && committed {
+            if !self.in_advance && !self.native_mode() {
+                // An input's commit that changed no node can still move a list (a report that refines its
+                // estimated extent): its boxes are laid out again with the snapshot, as a whole layout sends them.
+                if self.collection_heads.as_ref() != Some(&self.list_heads()) {
+                    return self.layout(batch);
+                }
+                self.judge_list_moves();
+                return Ok(());
+            }
             self.judge_list_moves();
             self.emit_collections(batch)?;
         }
         Ok(())
+    }
+
+    /// The lists' metadata `emit_collections` compares: rows, extent and corrections, not the feedback sequence.
+    fn list_heads(&self) -> Vec<exact_runner::CollectionSnapshot> {
+        let mut heads = self.runner.collections_shallow();
+        for head in &mut heads {
+            head.scroll_sequence = 0;
+        }
+        heads
     }
 
     /// The lists' metadata, when it moved. Layout and receipt work may change
@@ -515,10 +536,7 @@ impl<D: DataSource> Host<D> {
         } else {
             // Revisions cover rows, extent and corrections. A newer feedback
             // sequence alone needs no snapshot or serialization.
-            let mut heads = self.runner.collections_shallow();
-            for head in &mut heads {
-                head.scroll_sequence = 0;
-            }
+            let heads = self.list_heads();
             if self.collection_heads.as_ref() == Some(&heads) {
                 return Ok(());
             }

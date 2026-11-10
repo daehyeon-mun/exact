@@ -280,12 +280,19 @@ enum Backdrop {
 import CoreImage
 
 extension NodeView {
+    /// A box wholly outside its window's content has no backdrop on
+    /// screen to filter, so its layer holds no filter (a hidden card parked off the window, as at `left: -4000px`).
+    /// Its origin moving back into the window applies the backdrop again (`setFrameOrigin`).
+    var backdropOutsideWindow: Bool {
+        guard let window, let content = window.contentView else { return false }
+        return !convert(bounds, to: nil).intersects(content.convert(content.bounds, to: nil))
+    }
     /// The layer's backdrop blur, or none; a material (`backgroundMaterial`)
     /// takes the node's backdrop instead.
     func applyBackdrop() {
         backdropCoverChanged() // a ring it covers goes (`Mac/BackdropCoverMac.swift`)
         guard let l = layer else { return }
-        let operations = !cssVisibilityHidden && materialView == nil && props["backgroundMaterial"] == nil ? backdropOperations : []
+        let operations = !backdropOutsideWindow && !cssVisibilityHidden && materialView == nil && props["backgroundMaterial"] == nil ? backdropOperations : []
         guard !operations.isEmpty else {
             if l.backgroundFilters != nil { l.backgroundFilters = nil; backdropDrawn = nil; syncEllipticalClip(); syncShadowStand() }
             return

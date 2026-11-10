@@ -95,6 +95,8 @@ final class CollectionMacTests: XCTestCase {
             DispatchQueue.main.async { DispatchQueue.main.async { delivered.fulfill() } }
             wait(for: [delivered], timeout: 5)
             p.settlePump()
+            // A scroll's report goes to the owner without main waiting; it lands before a read.
+            session.drainFill()
         }
         func press(_ name: String) throws { p.press(try node(name).id); settle() }
         settle()

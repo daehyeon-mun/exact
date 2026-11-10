@@ -1288,6 +1288,19 @@ impl<D: DataSource> Runner<D> {
         std::mem::take(&mut self.surfaces)
     }
 
+    /// How many commands wait to be taken, and whether one named `name` came
+    /// after the first `from` of them (a propagation path
+    /// dispatched in one call stops where an action called `stopPropagation`).
+    pub fn command_count(&self) -> usize {
+        self.commands.len()
+    }
+    /// Whether a command named `name` came after the first `from` waiting.
+    pub fn command_since(&self, from: usize, name: &str) -> bool {
+        self.commands
+            .get(from..)
+            .is_some_and(|c| c.iter().any(|c| c.name == name))
+    }
+
     /// The commands actions emitted since the last take, and the runner's
     /// own scroll to a fragment once its route's content has arrived.
     pub fn take_commands(&mut self) -> Vec<Command> {

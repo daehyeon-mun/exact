@@ -189,11 +189,38 @@ final class SessionClockTimerTests: XCTestCase {
         let session = ExactApp.shared.makeSession()
         defer { session.destroy() }
         let view = ExactView(session: session)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = view
         XCTAssertNil(session.boot(plan: try Data(contentsOf: dir.appendingPathComponent("app.plan")), size: CGSize(width: 100, height: 100)).error)
         XCTAssertTrue(session.presenter.views.values.contains { $0.props["text"] == "standard" })
+        NotificationCenter.default.post(name: NSWindow.didChangeScreenNotification, object: window)
+        let settled = session.appliedBatches
+        for _ in 0..<3 {
+            NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: NSApplication.shared)
+        }
+        XCTAssertEqual(session.appliedBatches, settled, "unchanged screen reports do not repeat native presentation")
         DisplayRange.pinned = 4 // no preferences notification: only the screen change below
+        NotificationCenter.default.post(name: NSWindow.didChangeScreenNotification, object: NSObject())
+        XCTAssertEqual(session.appliedBatches, settled, "unrelated window notifications remain ignored")
+        XCTAssertTrue(session.presenter.views.values.contains { $0.props["text"] == "standard" })
         NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: NSApplication.shared)
         XCTAssertTrue(session.presenter.views.values.contains { $0.props["text"] == "high" })
+        if #available(macOS 26, *) {
+            let bits = session.preferenceBits(), before = session.appliedBatches
+            for name in [Notification.Name.NSApplicationShouldBeginSuppressingHighDynamicRangeContent,
+                         .NSApplicationShouldEndSuppressingHighDynamicRangeContent] {
+                NotificationCenter.default.post(name: name, object: NSApplication.shared)
+                XCTAssertEqual(session.preferenceBits(), bits, "temporary suppression leaves potential HDR capability")
+                XCTAssertEqual(session.appliedBatches, before, "suppression changes raster output, not media preferences")
+                XCTAssertTrue(session.presenter.views.values.contains { $0.props["text"] == "high" })
+            }
+        }
+        DisplayRange.pinned = 1
+        NotificationCenter.default.post(name: NSWindow.didChangeScreenNotification, object: window)
+        XCTAssertTrue(session.presenter.views.values.contains { $0.props["text"] == "standard" }, "moving back to SDR republishes preferences")
         withExtendedLifetime(view) {}
         #endif
     }

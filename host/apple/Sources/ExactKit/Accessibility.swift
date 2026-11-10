@@ -99,13 +99,14 @@ extension NodeView {
     package var ariaUnavailable: Bool {
         #if os(macOS)
         var ancestor: NSView? = self
+        let menus = presenter?.menus
         #else
         var ancestor: UIView? = self
         #endif
         while let view = ancestor {
             if let value = (view as? NodeView)?.props["accessibilityDisabled"] { return value == "true" }
             #if os(macOS)
-            ancestor = presenter?.menus.parent(of: view) ?? view.superview
+            ancestor = menus?.parent(of: view) ?? view.superview
             #else
             ancestor = presenter?.accessibilityParent(of: view) ?? view.superview
             #endif
@@ -308,6 +309,7 @@ extension NodeView {
         }
         // An `input`'s `aria-label` names its field, as a text area's names it.
         if let field, field.accessibilityLabel() != authoredLabel { field.setAccessibilityLabel(authoredLabel) }
+        accessibilityAvailability = enabled
         #else
         // UIKit has no property for `aria-required`, `aria-invalid`, `aria-haspopup` or `aria-current` (a button's current is its selected trait, NodeViewIOS).
         let target: UIView = field ?? presenter?.controls.controls[id] ?? textArea as UIView? ?? self
@@ -419,7 +421,8 @@ extension NodeView {
     /// or `menubar` a container of its children
     /// (`containerRoles`). Headings are paragraphs (`updateTextAccessibility`); names
     /// come from `syncAccessibility`.
-    func updateRoleAccessibility() {
+    func updateRoleAccessibility(committing: Bool = false) {
+        if !committing, isParagraph, presenter?.queueTextAccessibility(self) == true { return }
         let role = props["accessibilityRole"]
         if actsAsButton {
             setAccessibilityElement(true)
@@ -721,6 +724,9 @@ extension Presenter {
             DispatchQueue.main.async { [weak self] in self?.syncAccessibility() }
             return
         }
+        #if os(macOS)
+        flushTextAccessibility()
+        #endif
         let nodes: [NodeView]
         if let changed {
             let indexed = chrome.ids("accessibilityLive").union(chrome.ids("role:status")).union(chrome.ids("role:alert")).union(chrome.ids("autofocus"))
@@ -1123,14 +1129,21 @@ extension Presenter {
     /// The node holding the focus: itself, its field (through its editor on
     /// AppKit) or its text area.
     var focusedNode: NodeView? {
-        views.values.filter { node in
-            #if os(macOS)
-            guard let responder = node.window?.firstResponder else { return false }
-            return keyTarget(responder) === node
-            #else
+        #if os(macOS)
+        // The node a window's first responder belongs to is `keyTarget` of
+        // that responder, a walk up from it; asking every view for its window's responder was a scan of the whole
+        // presenter (every kept page included) on each batch that reads the focus.
+        var found: NodeView?
+        for window in NSApp.windows {
+            guard let responder = window.firstResponder, let node = keyTarget(responder), views[node.id] === node else { continue }
+            if found.map({ node.id < $0.id }) ?? true { found = node }
+        }
+        return found
+        #else
+        return views.values.filter { node in
             return node.isFirstResponder || node.field?.isFirstResponder == true || node.textArea?.isFirstResponder == true
-            #endif
         }.min(by: { $0.id < $1.id })
+        #endif
     }
     func focusPlace(tree json: String) -> FocusPlace? {
         focusedNode.flatMap { FocusTree(json)?.place(of: $0.id) }

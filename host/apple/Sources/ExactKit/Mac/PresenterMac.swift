@@ -76,6 +76,15 @@ package final class Presenter {
         textViewportIndex = nil
         refreshVisibleText()
     }
+    /// As `topLayerChanged`, but the visible-text rebuild coalesces to this
+    /// turn's end, as a batch's does (`oweTextRefresh`): a popover's show or
+    /// hide need not re-raster every visible paragraph before its own frame.
+    func topLayerChangedDeferred() {
+        selection.clear()
+        selection.structureChanged()
+        textViewportIndex = nil
+        oweTextRefresh()
+    }
     /// Scroll containers: the only views with a position to keep across a batch.
     var scrollers: Set<UInt32> = []
     let glassGroups = GlassGroups()
@@ -107,6 +116,9 @@ package final class Presenter {
     private var scrollObserver: NSObjectProtocol?
     private var visibleText: [UInt32: NSRect] = [:]
     private var textViewportIndex: TextViewportIndex?
+    /// The scroller that just moved and its offset, and each scroller's offset at its last text refresh.
+    var textScroll: (id: UInt32, y: CGFloat)?
+    private var textRefreshedAt: [UInt32: CGFloat] = [:]
     /// The native menu arm (LLP 1021 D3).
     lazy var menus = MenuHost(presenter: self)
     lazy var dialogs = DialogHost(self)
@@ -261,6 +273,9 @@ package final class Presenter {
         // Bounds notifications can arrive while a batch is still changing the
         // hierarchy. Query its final geometry once the outermost batch ends.
         guard !applying else { return false }
+        // One epoch for this pass's `canRasterText` answers.
+        Self.rasterEpochCounter &+= 1; Self.rasterRefreshEpoch = Self.rasterEpochCounter
+        defer { Self.rasterRefreshEpoch = 0 }
         if textViewportIndex == nil { textViewportIndex = TextViewportIndex(selection.shownParagraphs) }
         var next: [UInt32: NSRect] = [:]
         var waiting: [(CGFloat, NodeView)] = []
@@ -293,7 +308,7 @@ package final class Presenter {
         // Region readers own their pixel bands and publish positioned layers.
         // The ordinary backing-store band must not invalidate them a second time.
         for node in textViewportIndex!.candidates(reach: Self.textBandSlack)
-            where node.readerParagraph == nil && node.needsTextRaster && !node.rastersText && !node.textIsSmall {
+        where node.readerParagraph == nil && node.needsTextRaster && !node.rastersText {
             let want = textBand(node, reach: Self.textBandSlack)
             guard !want.isEmpty else { continue }
             let old = visibleText[node.id]
@@ -334,7 +349,7 @@ package final class Presenter {
     private var pumping = false
     private var pumpSchedule = PumpSchedule()
     private var pumpScreen: UInt32?
-    private var refreshInterval: TimeInterval { pumpSchedule.refreshInterval }
+    var refreshInterval: TimeInterval { pumpSchedule.refreshInterval }
     /// Scroll notifications can arrive repeatedly before the next refresh.
     /// One queued turn leaves AppKit's synchronizer first; the display link
     /// remains the fallback when notifications stop. Tokens retire old turns
@@ -455,6 +470,14 @@ package final class Presenter {
         // scroll view again until AppKit next calls in.
         sampleListTravel()
         leaves.scrolled()
+        if let moved = textScroll {
+            textScroll = nil
+            if let last = textRefreshedAt[moved.id], abs(moved.y - last) < RasterScheduling.refreshTravel { return }
+            textRefreshedAt[moved.id] = moved.y
+            textPending = refreshVisibleText(limit: nil) || textPending
+            if textPending { startPump(); queuePostSyncSlice() }
+            return
+        }
         // Only what is already on screen without paint; the rest is pumped.
         textPending = refreshVisibleText(limit: 0) || textPending
         if textPending {
@@ -599,6 +622,12 @@ package final class Presenter {
 
     /// A restart: every view goes.
     func reset() {
+        session?.resetQueuedInput()
+        menuDownPress = nil
+        passiveEcho = nil
+        echoRollbacks.removeAll()
+        textRefreshedAt.removeAll()
+        textScroll = nil
         resetting = true // (from its first teardown: a view it removes may end an edit)
         defer { resetting = false }
         MainActor.assumeIsolated { HeldState.retire(self) } // before its views leave the map (HeldState.swift)
@@ -685,6 +714,11 @@ package final class Presenter {
     var onCommand: ((String, [Any], UInt32?) -> Void)?
     /// A `key` handler called `preventDefault()` (`keyDown(at:_:)`, KeyEvents.swift).
     var defaultPrevented = false
+    /// The button a down pressed, and the click's event number: its up presses it no more.
+    var menuDownPress: (button: UInt32, click: Int)?
+    /// The key echoed in this turn, sent at its end (`PassiveInputMac.swift`).
+    var passiveEcho: PassiveInput.Echo?
+    var echoRollbacks: [Int: PassiveInput.Rollback] = [:]
     /// The last wheel or magnify event and whether a `wheel` handler
     /// prevented it: every view it passes up asks once (MouseEventsMac.swift).
     var lastWheel: (NSEvent, Bool)?
@@ -698,8 +732,11 @@ package final class Presenter {
     /// The events beyond press and change (LLP 1005 §3).
     var onHover: ((UInt32, Bool) -> Void)?
     var onFocus, onBlur: ((UInt32) -> Void)?
-    /// A `key` or `keyup` (`KeyPress.up`) at a node (KeyEvents.swift).
-    var onKey: ((UInt32, KeyPress) -> Void)?
+    /// A `key` or `keyup` (`KeyPress.up`) at a node (KeyEvents.swift). Setting it ends `onKeyPath`, so whoever
+    /// replaces it hears every key node by node.
+    var onKey: ((UInt32, KeyPress) -> Void)? { didSet { onKeyPath = nil } }
+    /// A key's propagation path, (view, payload, capture), and whether it is a release; set after `onKey`.
+    var onKeyPath: (([(UInt32, String, Bool)], Bool) -> Void)?
     var onClipboard: ((UInt32, UInt32, String) -> Void)?
     /// A `text`'s part of the selection changed: its text and source offsets.
     var onSelectionChange: ((UInt32, String, Int, Int, [CGRect]) -> Void)?
@@ -761,7 +798,12 @@ package final class Presenter {
     /// view (LLP 1063) does not until its exit ends.
     @discardableResult
     func release(_ id: UInt32, forget: Bool) -> NodeView? {
-        if let node = views[id] { mouseChain.bubbledPress?.cancel(in: node) }
+        if let node = views[id] {
+            mouseChain.bubbledPress?.cancel(in: node)
+            if passiveEcho?.node === node { passiveEcho = nil }
+            echoRollbacks = echoRollbacks.filter { $0.value.node !== node }
+        }
+        textRefreshedAt[id] = nil
         focusEvents.removed(id)
         // A held node that goes has no handler left to hear its up.
         if pointerHeld == id { pointerHeld = nil }
@@ -826,6 +868,10 @@ package final class Presenter {
         return client(NodeView.point(click, in: viewport.window))
     }
     package func press(_ id: UInt32, fromNativeMenu: Bool = false, held: String = "", bubbled: Bool = false, outsideModal: Bool = false, click: NSEvent? = nil) {
+        if let click, click.type == .leftMouseUp, let down = menuDownPress, down.click == click.eventNumber {
+            menuDownPress = nil
+            if down.button == id { return }  // its down pressed it
+        }
         pressHeld = held; defer { pressHeld = "" } // `outsideModal`: an app-wide menu item's (ShortcutsMac `enabled`)
         guard let node = textHost(id), !(bubbled || outsideModal ? node.authoredInert : node.inert), !node.disabled,
               fromNativeMenu || (segments.shown(node) ?? sidebar.shows(node) ?? !node.isHiddenOrHasHiddenAncestor) || toolbar.contains(node) else { return }
@@ -855,8 +901,13 @@ package final class Presenter {
     var onChecked: ((UInt32, Bool) -> Void)?
     func typed(_ id: UInt32, _ value: String, input: Bool) {
         edited = id
+        // AppKit has drawn the edit into the field by now (its `beforeinput`
+        // already answered). In a key's turn that frame goes to the screen before the owner hears `input`, as
+        // `Session.flushIfInputShows` sends a batch's: the glyph does not wait for the app's `input` handler and its commit.
+
         if input { onInput?(id, value) }
     }
+
     func commitEdit(_ id: UInt32, _ value: String, change: Bool) {
         guard edited == id else { return }
         edited = nil
@@ -877,13 +928,14 @@ package final class Presenter {
     /// A select's options and the one it shows, read from the kernel.
     var selectOptions: ((UInt32) -> SelectMenu)?
     var buttonFace: ((UInt32) -> ButtonFace)?
+    var buttonFaces: (([UInt32]) -> [ButtonFace])?
 
     /// An event a view reports: sent only while the presenter still has the
     /// view (the platform fires editing-ended as a destroyed field leaves the
     /// window; the browser fires no blur on removal, so neither does this
     /// host), and never while a batch is being applied — it waits for the
     /// batch to finish, then goes if its view survived it.
-    private var applying = false
+    private(set) var applying = false
     var isApplying: Bool { applying }
     /// Each painted popover's region not yet told the kernel, the latest, with the view it is for (`tellRegion`).
     var regionsUntold: [UInt32: (view: ObjectIdentifier?, block: HostBlock?)] = [:]
@@ -905,6 +957,7 @@ package final class Presenter {
     }
     private var waiting: [(UInt32, () -> Void)] = []
     private var afterBatchWork: [() -> Void] = []
+    var pendingTextAccessibility: [WeakNodeView] = []
     /// Work for after the batch being applied, or now: a hatch's act on an
     /// element never lands inside a batch (LLP 1075.003 §3.4).
     func afterBatch(_ work: @escaping () -> Void) { if applying { afterBatchWork.append(work) } else { work() } }
@@ -1066,6 +1119,7 @@ package final class Presenter {
         if structureChanged { selection.structureChanged() }
         // A button's face changes only in a batch that says so or one that touches it (`ControlHost.face`).
         if batch.controls { controls.facesChanged() }
+        let destroyedViews = Set(batch.ops.lazy.filter { $0.op == .destroy }.map(\.id))
         for op in batch.ops {
             let kind = op.op
             let id = op.id
@@ -1104,7 +1158,7 @@ package final class Presenter {
                 v.handlers = op.handlers
                 v.applyStyle(v.presented(op.style))
                 v.applyProps(set: op.props, clear: [])
-                v.embedFrame(self)
+                menus.created(v); v.embedFrame(self)
                 views[id] = v
                 elements.created(v)
                 if v.kind == "list" { listViews[id] = v }
@@ -1119,6 +1173,7 @@ package final class Presenter {
                 views[id]?.applyFlow(op.payload["shapes"] as? [[String: Any]] ?? [])
             case .style:
                 guard let v = views[id] ?? leaving[id]?.view else { continue }
+                if v.lastStyleOp == op.style { continue }; v.lastStyleOp = op.style
                 let color = v.style["text_color"], old = v.style
                 v.applyStyle(v.presented(op.style))
                 v.refreshPressInheritance()
@@ -1153,7 +1208,14 @@ package final class Presenter {
                 if let v = views[id] { session?.canvases.surface(view: v, name: op.payload["name"] as? String ?? "", values: op.payload["values"] ?? []) }
             case .canvas2d: if let v = views[id] { canvas2d.apply(id, op.payload, layer: v.layer) }
             case .svg: if let v = views[id] { svg.scene(id, op.payload, layer: v.layer, dark: v.drawsDark, clock: session?.clock, limit: v.style["dynamic_range_limit"]?.string, tint: v.viewTint) }
-            case .animations: svg.animations(id, op.payload, layer: views[id]?.layer, clock: session?.clock)
+            case .animations:
+                // An additive translate is relative to its target: the model takes the target in this batch, before
+                // the animation is installed, whatever batch the engine's present of it comes in.
+                if let v = views[id], let to = CssAnimation.list(op.payload["specs"]).first(where: { $0.additive })?.additiveTarget, to.count == 4 {
+                    let px = CGPoint(x: to[0], y: to[1]), pc = CGPoint(x: to[2], y: to[3])
+                    if v.translatePx != px || v.translatePercent != pc { v.translatePx = px; v.translatePercent = pc; v.applyTransform() }
+                }
+                svg.animations(id, op.payload, layer: views[id]?.layer, clock: session?.clock)
             case .command:
                 let name = op.payload["name"] as? String ?? ""
                 if name == "preventDefault" { defaultPrevented = true; break }
@@ -1174,7 +1236,10 @@ package final class Presenter {
                 forgetFlight(id)
                 views[id]?.holdGone()
                 if endExit(id) { continue }
-                release(id, forget: true)?.removeFromSuperview()
+                let gone = release(id, forget: true)
+                // A view whose parent view goes in this batch too leaves with it.
+                if let parent = gone?.superview as? NodeView, destroyedViews.contains(parent.id), views[parent.id] == nil || views[parent.id] === parent { continue }
+                gone?.removeFromSuperview()
             case .roots:
                 dialogs.children(root, op.ids.compactMap { views[UInt32($0)] })
                 menus.children(root, op.ids.compactMap { views[UInt32($0)] })
@@ -1187,7 +1252,9 @@ package final class Presenter {
                 }
             case .frame:
                 guard let v = views[id] else { continue }
-                applyFrame(v, NSRect(x: op.x, y: op.y, width: op.w, height: op.h))
+                let rect = NSRect(x: op.x, y: op.y, width: op.w, height: op.h)
+                if v.lastFrameOp == rect, v.superview != nil { continue }; v.lastFrameOp = rect
+                applyFrame(v, rect)
             case .fieldContent:
                 views[id]?.applyFieldContent(op.payload)
             case .content:
@@ -1237,9 +1304,9 @@ package final class Presenter {
             node.applyPendingScroll()
         }
         pendingScrolls.removeAll()
-        segments.sync()
+        // A batch of presentation values only changes no shortcut, status item, segment or dialog.
+        let presentationOnly = !batch.controls && batch.ops.allSatisfy { Self.presentationKinds.contains($0.op) }
         controls.sync()
-        dialogs.sync()
         menus.sync()
         glassGroups.reconcile()
         positionContexts()
@@ -1250,8 +1317,6 @@ package final class Presenter {
             toolbar.shadowCheck()
             #endif
         }
-        shortcuts.sync()
-        statusItems.sync()
         if structureChanged { selection.structureChanged() }
         // The key-view loop is read only by a key event (Tab): it is marked
         // stale here and rebuilt when one arrives (`flushKeyViewLoop`), not
@@ -1259,19 +1324,47 @@ package final class Presenter {
         if structureChanged || batch.ops.contains(where: { $0.op == .props }) {
             keyViewLoopStale = true
         }
-        refreshVisibleText()
+
         // The nodes this batch touched and the views above them, as iOS
         // passes them: a full pass sorted every view in the session on
         // every batch, a list's scroll included.
         let changed = touchedAndAbove(batch.ops.lazy.filter { Self.accessibilityOps.contains($0.op) }.map(\.id)).union(reparented)
         let ariaProps = batch.ops.filter { $0.op == .props && ($0.props["accessibilityDisabled"] != nil || $0.clear.contains("accessibilityDisabled")) }.map(\.id)
         let disabledRoots = Set(ariaProps).union(reparented.filter { id in
-            guard let node = views[id] else { return false }
-            return node.isAccessibilityEnabled() != (!node.disabled && !node.ariaUnavailable)
+            guard let node = views[id], let previous = node.accessibilityAvailability else { return false }
+            return previous != (!node.disabled && !node.ariaUnavailable)
         })
+        if !presentationOnly {
+            segments.sync(); dialogs.sync()
+            shortcuts.freshViews = changed
+            shortcuts.sync(); statusItems.sync()
+        }
         syncAccessibility(changed: changed, disabledRoots: disabledRoots)
+        oweTextRefresh()
+
         _ = chrome.takeChangedNames()
     }
+
+    /// The text refresh pass under way (0: none) and the last one given.
+    nonisolated(unsafe) static var rasterRefreshEpoch: UInt = 0, rasterEpochCounter: UInt = 0
+
+    /// Raster work coalesces within a turn; input and accessibility state is current when apply returns.
+    private var textRefreshOwed = false
+    private func oweTextRefresh() {
+        guard !textRefreshOwed else { return }
+        textRefreshOwed = true
+        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, false, -1_000_000) { [weak self] _, _ in
+            guard let self else { return }
+            self.textRefreshOwed = false
+            self.refreshVisibleText()
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+    }
+
+    /// A batch with no ops changes no host either; the menu's button faces are
+    /// fetched in one owner call.
+
+    static let presentationKinds: Set<BatchOp.Kind> = [.present, .frame, .animations, .retireMotion, .rank]
 
     func orderChildren(_ children: [NodeView], in container: NSView) {
         // Detaching a retained child clears AppKit's first responder. Sort
@@ -1384,53 +1477,5 @@ package final class Presenter {
         if children, start.overlay != nil { start.needsCapture = true }
         if let c = start.paragraphOwner.canvasAbove { c.needsCapture = true }
     }
-}
-
-/// A view's subtree as pixels (LLP 1014 D3).
-package enum Capture {
-    /// A capture is drawing: its draws are not repaints (D4 b).
-    nonisolated(unsafe) static var capturing = false
-    /// Guest pictures for this turn, by the node that draws each (two
-    /// sessions' ids can be the same); the remote platform views are hidden
-    /// while their owning nodes draw these (@ref LLP 1020 D4/D6, `withGuests`).
-    nonisolated(unsafe) static var web: [ObjectIdentifier: ExactWebImage] = [:]
-
-    /// The subtree painted at `scale`: premultiplied RGBA, rows top-down,
-    /// `pixelsWide * 4` bytes per row, transparent where nothing painted.
-    package static func bitmap(of view: NSView, scale: CGFloat, prepared: Bool = false) -> NSBitmapImageRep? {
-        if !prepared { prepareBackingLayers(of: view) }
-        // A subtree painted through its canvas composites at alpha 0; paint
-        // it opaque into the bitmap regardless.
-        let alpha = view.alphaValue
-        view.alphaValue = 1
-        // A canvas nested under this one that is painted through its own
-        // surface: its picture comes by readback (its draw), not from its
-        // overlay's views, so those are hidden for the duration.
-        var hidden: [NSView] = []
-        func hide(_ v: NSView) {
-            for s in v.subviews {
-                if let n = s as? NodeView, n.placement != nil, !n.isHidden { n.isHidden = true; hidden.append(n); continue }
-                if let n = s as? NodeView, let o = n.overlay, o.alphaValue == 0, !o.isHidden { o.isHidden = true; hidden.append(o); continue }
-                hide(s)
-            }
-        }
-        hide(view)
-        let rep = paintOrderBitmap(of: view, scale: scale, prepared: true)
-        for o in hidden { o.isHidden = false }
-        view.alphaValue = alpha
-        return rep
-    }
-}
-
-extension NSRect {
-    /// The rect inside the given edges (never negative in size).
-    func insetBy(left: CGFloat, top: CGFloat, right: CGFloat, bottom: CGFloat) -> NSRect {
-        NSRect(x: minX + left, y: minY + top, width: max(0, width - left - right), height: max(0, height - top - bottom))
-    }
-}
-/// The display link's Objective-C target: `Presenter` is not an `NSObject`.
-final class PumpTarget: NSObject {
-    var fire: ((TimeInterval) -> Void)?
-    @objc func tick(_ link: CADisplayLink) { fire?(link.targetTimestamp - link.timestamp) }
 }
 #endif

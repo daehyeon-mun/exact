@@ -265,6 +265,11 @@ impl<D: DataSource> Links<D> {
 /// The capabilities `plan` uses that `linked` lacks, by name; `None` when
 /// it links them all.
 pub fn missing(plan: &exact_plan::Plan, linked: Uses) -> Option<String> {
+    // An archive that links every capability lacks none,
+    // whatever the plan uses, so the plan is not scanned.
+    if ALL.beyond(linked).is_empty() {
+        return None;
+    }
     let missing = exact_runner::uses(plan).beyond(linked);
     (!missing.is_empty()).then(|| missing.to_string())
 }
